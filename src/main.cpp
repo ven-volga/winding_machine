@@ -68,7 +68,7 @@ static void ui_task(void* arg)
         ui_update();
 
         // Оновлюємо UI кожні UI_REFRESH_MS мс (задано в config.h)
-        vTaskDelay(UI_REFRESH_MS);
+        vTaskDelay(pdMS_TO_TICKS(UI_REFRESH_MS));
     }
 }
 
@@ -78,21 +78,6 @@ static void ui_task(void* arg)
 
 extern "C" void app_main(void)
 {
-    // Тільки LCD — без RTOS задач, без motion
-    //lcd_init();
-    //vTaskDelay(pdMS_TO_TICKS(200));
-
-    //lcd_clear();
-    //vTaskDelay(pdMS_TO_TICKS(50));
-
-    //lcd_set_cursor(0, 0);
-    //lcd_print("Hello!");
-
-    // Зупиняємось тут — більше нічого не запускаємо
-    //while(true) {
-        //vTaskDelay(pdMS_TO_TICKS(1000));
-    //}
-
     // Ініціалізація всіх підсистем
     motion_init();   // GPIO кроковиків, розрахунок ratio
     ui_init();       // LCD, енкодер (поки TODO)
@@ -105,7 +90,7 @@ extern "C" void app_main(void)
     xTaskCreatePinnedToCore(
         motion_task,   // функція задачі
         "motion",      // назва (для відладки)
-        4096,          // розмір стеку в байтах
+        8192,          // розмір стеку в байтах
         NULL,          // аргумент (не потрібен)
         5,             // пріоритет (вищий)
         NULL,          // хендл задачі (не зберігаємо)
@@ -116,7 +101,7 @@ extern "C" void app_main(void)
     xTaskCreatePinnedToCore(
         ui_task,       // функція задачі
         "ui",          // назва
-        4096,          // стек
+        8192,          // стек
         NULL,          // аргумент
         3,             // пріоритет (нижчий)
         NULL,          // хендл
