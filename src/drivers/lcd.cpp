@@ -1,23 +1,14 @@
 // lcd.cpp
 //
 // Драйвер LCD 2004 через I2C експандер PCF8574.
-// Використовує нативний ESP-IDF I2C API (не Arduino).
+// Використовує нативний ESP-IDF I2C API.
 //
 // Підключення:
-//   SDA → GPIO 21
-//   SCL → GPIO 22
-//   VCC → 5V (або 3.3V якщо є jumper на модулі)
-//   GND → GND
+//   SDA → GPIO 21,  SCL → GPIO 22
+//   VCC експандера → 3.3V,  VCC дисплею → 5V,  GND → GND
 //
-// PCF8574 керує 8 лініями LCD через I2C:
-//   P0 → RS    (Register Select)
-//   P1 → RW    (завжди 0 — тільки запис)
-//   P2 → EN    (Enable — строб даних)
-//   P3 → BL    (підсвітка)
-//   P4 → D4    (шина даних, старший нібл)
-//   P5 → D5
-//   P6 → D6
-//   P7 → D7
+// Конфлікт ISR/I2C вирішений в encoder.cpp (polling замість ISR) —
+// тому тут Mutex не потрібен і не використовується.
 
 #include "lcd.h"
 #include "pins.h"
@@ -28,18 +19,15 @@
 #include "freertos/task.h"
 
 // ─────────────────────────────────────────
-// Константи LCD команд (HD44780)
+// Константи HD44780
 // ─────────────────────────────────────────
 
-#define LCD_CMD_CLEAR          0x01
-#define LCD_CMD_HOME           0x02
-#define LCD_CMD_ENTRY_MODE     0x06  // зліва направо, без зсуву
-#define LCD_CMD_DISPLAY_ON     0x0C  // дисплей вкл, курсор викл, моргання викл
-#define LCD_CMD_FUNCTION_SET   0x28  // 4-бітна шина, 2 рядки, 5×8 точок
-#define LCD_CMD_DDRAM          0x80  // базова адреса DDRAM
+#define LCD_CMD_CLEAR        0x01
+#define LCD_CMD_ENTRY_MODE   0x06
+#define LCD_CMD_DISPLAY_ON   0x0C
+#define LCD_CMD_FUNCTION_SET 0x28
+#define LCD_CMD_DDRAM        0x80
 
-// Початкові адреси рядків в DDRAM пам'яті HD44780
-// (для 2004 дисплею)
 static const uint8_t ROW_OFFSETS[4] = {0x00, 0x40, 0x14, 0x54};
 
 // ─────────────────────────────────────────
@@ -51,23 +39,17 @@ static const uint8_t ROW_OFFSETS[4] = {0x00, 0x40, 0x14, 0x54};
 #define BIT_EN  0x04
 #define BIT_BL  0x08
 
-// Поточний стан підсвітки (додається до кожного байту)
 static uint8_t backlightBit = BIT_BL;
 
 // ─────────────────────────────────────────
-// I2C налаштування
+// I2C
 // ─────────────────────────────────────────
 
-#define I2C_PORT     I2C_NUM_0
-#define I2C_SDA_PIN  21
-#define I2C_SCL_PIN  22
-#define I2C_FREQ_HZ  100000  // 100 кГц — стандарт для LCD
+#define I2C_PORT    I2C_NUM_0
+#define I2C_SDA_PIN 21
+#define I2C_SCL_PIN 22
+#define I2C_FREQ_HZ 100000
 
-// ─────────────────────────────────────────
-// Низькорівневі функції
-// ─────────────────────────────────────────
-
-// Надіслати один байт до PCF8574 через I2C
 static void i2c_write_byte(uint8_t data)
 {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -79,30 +61,23 @@ static void i2c_write_byte(uint8_t data)
     i2c_cmd_link_delete(cmd);
 }
 
-// Стробувати EN: надіслати байт з EN=1, потім EN=0
-// Так LCD зчитує дані
 static void lcd_strobe(uint8_t data)
 {
     i2c_write_byte(data | BIT_EN | backlightBit);
-    esp_rom_delay_us(1);
+    esp_rom_delay_us(10);
     i2c_write_byte((data & ~BIT_EN) | backlightBit);
-    esp_rom_delay_us(50);
+    esp_rom_delay_us(200);
 }
 
-// Надіслати старший нібл (4 біти) до LCD
 static void lcd_write_nibble(uint8_t nibble, uint8_t mode)
 {
-    // mode: 0 = команда (RS=0), BIT_RS = дані (RS=1)
-    uint8_t data = (nibble & 0xF0) | mode | backlightBit;
-    lcd_strobe(data);
+    lcd_strobe((nibble & 0xF0) | mode | backlightBit);
 }
 
-// Надіслати повний байт (команда або дані) через 4-бітну шину
-// Спочатку старший нібл, потім молодший
 static void lcd_send(uint8_t value, uint8_t mode)
 {
-    lcd_write_nibble(value & 0xF0, mode);          // старший нібл
-    lcd_write_nibble((value << 4) & 0xF0, mode);   // молодший нібл
+    lcd_write_nibble(value & 0xF0, mode);
+    lcd_write_nibble((value << 4) & 0xF0, mode);
 }
 
 // ─────────────────────────────────────────
@@ -111,43 +86,37 @@ static void lcd_send(uint8_t value, uint8_t mode)
 
 void lcd_init()
 {
-    // Налаштування I2C шини
     i2c_config_t conf = {
-        .mode             = I2C_MODE_MASTER,
-        .sda_io_num       = I2C_SDA_PIN,
-        .scl_io_num       = I2C_SCL_PIN,
-        .sda_pullup_en    = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en    = GPIO_PULLUP_ENABLE,
-        .master = {
-            .clk_speed    = I2C_FREQ_HZ,
-        },
-        .clk_flags        = 0,
+        .mode          = I2C_MODE_MASTER,
+        .sda_io_num    = I2C_SDA_PIN,
+        .scl_io_num    = I2C_SCL_PIN,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master        = { .clk_speed = I2C_FREQ_HZ },
+        .clk_flags     = 0,
     };
     i2c_param_config(I2C_PORT, &conf);
     i2c_driver_install(I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
 
-    // Затримка після подачі живлення
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Ініціалізація HD44780 в 4-бітному режимі
-    // (послідовність згідно datasheet)
+    // Ініціалізація HD44780 в 4-бітному режимі (datasheet послідовність)
     lcd_write_nibble(0x30, 0); vTaskDelay(pdMS_TO_TICKS(5));
-    lcd_write_nibble(0x30, 0); esp_rom_delay_us(150);
-    lcd_write_nibble(0x30, 0); esp_rom_delay_us(150);
-    lcd_write_nibble(0x20, 0); esp_rom_delay_us(150); // перехід в 4-біт режим
+    lcd_write_nibble(0x30, 0); vTaskDelay(pdMS_TO_TICKS(1));
+    lcd_write_nibble(0x30, 0); vTaskDelay(pdMS_TO_TICKS(1));
+    lcd_write_nibble(0x20, 0); vTaskDelay(pdMS_TO_TICKS(1));
 
-    // Основні команди ініціалізації
-    lcd_send(LCD_CMD_FUNCTION_SET, 0);  // 4-біт, 2 рядки, 5×8
-    lcd_send(LCD_CMD_DISPLAY_ON,   0);  // дисплей вкл
-    lcd_send(LCD_CMD_CLEAR,        0);  // очистити
-    vTaskDelay(pdMS_TO_TICKS(2));       // clear потребує >1.5 мс
-    lcd_send(LCD_CMD_ENTRY_MODE,   0);  // напрямок вводу
+    lcd_send(LCD_CMD_FUNCTION_SET, 0);
+    lcd_send(LCD_CMD_DISPLAY_ON,   0);
+    lcd_send(LCD_CMD_CLEAR,        0);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    lcd_send(LCD_CMD_ENTRY_MODE,   0);
 }
 
 void lcd_clear()
 {
     lcd_send(LCD_CMD_CLEAR, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));
+    vTaskDelay(pdMS_TO_TICKS(5));
 }
 
 void lcd_set_cursor(uint8_t col, uint8_t row)
@@ -160,9 +129,7 @@ void lcd_set_cursor(uint8_t col, uint8_t row)
 void lcd_print(const char* str)
 {
     while (*str)
-    {
         lcd_send((uint8_t)*str++, BIT_RS);
-    }
 }
 
 void lcd_write_char(char c)

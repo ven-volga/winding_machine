@@ -31,6 +31,7 @@
 #include "logic/machine.h"
 
 #include "drivers/lcd.h"
+#include <config.h>
 
 // ─────────────────────────────────────────
 // RTOS задача: логіка намотки (ядро 0)
@@ -67,7 +68,7 @@ static void ui_task(void* arg)
         ui_update();
 
         // Оновлюємо UI кожні UI_REFRESH_MS мс (задано в config.h)
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(UI_REFRESH_MS);
     }
 }
 

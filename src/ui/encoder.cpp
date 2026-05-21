@@ -1,72 +1,80 @@
 // encoder.cpp
 //
-// Обробка квадратурного енкодера з кнопкою.
-// Використовує переривання GPIO для точного відстеження обертання.
+// Обробка квадратурного енкодера з кнопкою через polling.
+//
+// Чому polling замість ISR:
+//   ISR переривав I2C транзакцію до LCD посередині і давав артефакти.
+//   Polling викликається з ui_task кожні 10 мс — цього достатньо
+//   для надійного відстеження обертання енкодера рукою.
+//   Людина не може крутити енкодер швидше ніж 10-20 імпульсів/сек,
+//   тому 10 мс polling повністю достатньо.
 //
 // Підключення:
-//   A   → ENCODER_A_PIN  (з підтяжкою PULLUP)
-//   B   → ENCODER_B_PIN  (з підтяжкою PULLUP)
-//   BTN → ENCODER_BTN_PIN (з підтяжкою PULLUP, замикає на GND)
+//   A   → ENCODER_A_PIN   (PULLUP, замикає на GND)
+//   B   → ENCODER_B_PIN   (PULLUP, замикає на GND)
+//   BTN → ENCODER_BTN_PIN (PULLUP, замикає на GND)
 //   GND → GND
 //
-// Як працює квадратурний енкодер:
-//   При обертанні A і B генерують імпульси зі зсувом 90°.
-//   За зміною A читаємо стан B — це визначає напрямок.
-//   A змінився, B=0 → вправо (+1)
-//   A змінився, B=1 → вліво (-1)
+// Як визначається напрямок (таблиця станів):
+//   Зберігаємо попередній стан {A,B} і порівнюємо з поточним.
+//   Певні переходи між станами відповідають руху вправо або вліво.
+//   Це надійніше ніж просто читати B при зміні A.
 
 #include "encoder.h"
 #include "pins.h"
+#include "config.h"
 
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_attr.h"
+
+// ─────────────────────────────────────────
+// Таблиця станів квадратурного енкодера
+// ─────────────────────────────────────────
+//
+// Кожен стан — це {A, B} у вигляді 2-бітного числа: (A<<1)|B
+// Переходи між станами при обертанні:
+//   Вправо: 00→01→11→10→00  (+1 за кожен крок)
+//   Вліво:  00→10→11→01→00  (-1 за кожен крок)
+//
+// Таблиця кодує результат для кожного переходу [prev][curr]:
+//  0 = немає руху або невалідний перехід
+// +1 = крок вправо
+// -1 = крок вліво
+
+static const int8_t ENCODER_TABLE[4][4] = {
+//curr: 00   01   10   11
+      {  0,  -1,  +1,   0 },  // prev: 00
+      { +1,   0,   0,  -1 },  // prev: 01
+      { -1,   0,   0,  +1 },  // prev: 10
+      {  0,  +1,  -1,   0 },  // prev: 11
+};
 
 // ─────────────────────────────────────────
 // Внутрішні змінні
 // ─────────────────────────────────────────
 
-// Накопичений дельта від обертання (volatile бо змінюється в ISR)
-static volatile int8_t encoderDelta = 0;
+// Накопичений дельта від обертання
+static int8_t encoderDelta = 0;
+
+// Попередній стан {A,B}
+static uint8_t lastEncState = 0;
 
 // ── Кнопка ──────────────────────────────
 
-// Debounce для кнопки (мс)
-#define BTN_DEBOUNCE_MS  30
-
-// Стани кнопки
 typedef enum {
-    BTN_IDLE,       // не натиснута
-    BTN_PRESSED,    // натиснута, чекаємо відпускання
-    BTN_LONG_WAIT,  // чекаємо довгого натиску
+    BTN_IDLE,
+    BTN_PRESSED,
+    BTN_LONG_WAIT,
 } BtnState;
 
-static BtnState btnState       = BTN_IDLE;
-static uint32_t btnPressTime   = 0;    // час натискання (мс)
-static bool     rawBtnLast     = false;
+static BtnState btnState        = BTN_IDLE;
+static uint32_t btnPressTime    = 0;
 static uint32_t btnDebounceTime = 0;
+static bool     rawBtnLast      = false;
 
-// Прапорці подій — скидаються після читання
-static volatile bool eventClick     = false;
-static volatile bool eventLongPress = false;
-
-// ─────────────────────────────────────────
-// ISR — переривання на зміну сигналу A
-// ─────────────────────────────────────────
-
-// IRAM_ATTR — функція має жити в IRAM (швидка пам'ять)
-// бо викликається з переривання
-static void IRAM_ATTR encoder_isr(void* arg)
-{
-    // Читаємо стан B в момент зміни A
-    int b = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
-
-    if (b == 0)
-        encoderDelta = encoderDelta + 1;  // вправо
-    else
-        encoderDelta = encoderDelta - 1;  // вліво
-}
+static bool eventClick     = false;
+static bool eventLongPress = false;
 
 // ─────────────────────────────────────────
 // Публічні функції
@@ -74,38 +82,42 @@ static void IRAM_ATTR encoder_isr(void* arg)
 
 void encoder_init()
 {
-    // Налаштування піну A — вхід з підтяжкою, переривання на будь-яку зміну
-    gpio_config_t enc_conf = {
-        .pin_bit_mask = (1ULL << ENCODER_A_PIN) | (1ULL << ENCODER_B_PIN),
+    // Всі три піни: вхід з підтяжкою, без переривань
+    gpio_config_t conf = {
+        .pin_bit_mask = (1ULL << ENCODER_A_PIN) |
+                        (1ULL << ENCODER_B_PIN)  |
+                        (1ULL << ENCODER_BTN_PIN),
         .mode         = GPIO_MODE_INPUT,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,  // без переривань — тільки polling
     };
-    gpio_config(&enc_conf);
+    gpio_config(&conf);
 
-    // Налаштування кнопки
-    gpio_config_t btn_conf = {
-        .pin_bit_mask = (1ULL << ENCODER_BTN_PIN),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&btn_conf);
-
-    // Переривання тільки на пін A (визначає напрямок через B)
-    gpio_set_intr_type((gpio_num_t)ENCODER_A_PIN, GPIO_INTR_ANYEDGE);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add((gpio_num_t)ENCODER_A_PIN, encoder_isr, NULL);
+    // Читаємо початковий стан щоб уникнути хибного першого кроку
+    uint8_t a = gpio_get_level((gpio_num_t)ENCODER_A_PIN) ? 1 : 0;
+    uint8_t b = gpio_get_level((gpio_num_t)ENCODER_B_PIN) ? 1 : 0;
+    lastEncState = (a << 1) | b;
 }
 
 void encoder_update()
 {
     uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
-    // ── Обробка кнопки ───────────────────────────────────────────
-    // LOW = натиснута (PULLUP + замикання на GND)
+    // ── Обертання енкодера (таблиця станів) ─────────────────────
+    uint8_t a = gpio_get_level((gpio_num_t)ENCODER_A_PIN) ? 1 : 0;
+    uint8_t b = gpio_get_level((gpio_num_t)ENCODER_B_PIN) ? 1 : 0;
+    uint8_t currState = (a << 1) | b;
+
+    if (currState != lastEncState)
+    {
+        // Визначаємо напрямок за таблицею переходів
+        int8_t step = ENCODER_TABLE[lastEncState][currState];
+        encoderDelta += step;
+        lastEncState = currState;
+    }
+
+    // ── Кнопка з debounce і детектором довгого натиску ──────────
     bool rawBtn = (gpio_get_level((gpio_num_t)ENCODER_BTN_PIN) == 0);
 
     switch (btnState)
@@ -113,7 +125,6 @@ void encoder_update()
         case BTN_IDLE:
             if (rawBtn && rawBtn != rawBtnLast)
             {
-                // Щойно натиснули — запускаємо debounce
                 btnDebounceTime = now;
                 btnState = BTN_PRESSED;
             }
@@ -124,14 +135,12 @@ void encoder_update()
             {
                 if (rawBtn)
                 {
-                    // Підтверджено натискання — запам'ятовуємо час
                     btnPressTime = now;
                     btnState = BTN_LONG_WAIT;
                 }
                 else
                 {
-                    // Відпустили за час debounce — шум, ігноруємо
-                    btnState = BTN_IDLE;
+                    btnState = BTN_IDLE; // шум
                 }
             }
             break;
@@ -139,18 +148,14 @@ void encoder_update()
         case BTN_LONG_WAIT:
             if (!rawBtn)
             {
-                // Відпустили — короткий натиск
-                uint32_t held = now - btnPressTime;
-                if (held < LONG_PRESS_MS)
-                    eventClick = true;
-                // Якщо held >= LONG_PRESS_MS — довгий вже спрацював нижче
+                // Відпустили — перевіряємо скільки тримали
+                if ((now - btnPressTime) < LONG_PRESS_MS)
+                    eventClick = true;      // короткий натиск
                 btnState = BTN_IDLE;
             }
             else if ((now - btnPressTime) >= LONG_PRESS_MS)
             {
-                // Тримають довше LONG_PRESS_MS — довгий натиск
-                eventLongPress = true;
-                // Чекаємо поки відпустять (переходимо в IDLE при відпусканні)
+                eventLongPress = true;      // довгий натиск
                 btnState = BTN_IDLE;
             }
             break;
@@ -161,14 +166,8 @@ void encoder_update()
 
 int8_t encoder_get_delta()
 {
-    // Атомарно читаємо і скидаємо.
-    // spinlock захищає від одночасного доступу з ISR.
-    // Мux має бути статичною змінною — не можна брати адресу тимчасового об'єкту.
-    static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
-    portENTER_CRITICAL(&mux);
     int8_t delta = encoderDelta;
     encoderDelta = 0;
-    portEXIT_CRITICAL(&mux);
     return delta;
 }
 
