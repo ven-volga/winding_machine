@@ -30,6 +30,8 @@
 #include "ui/ui.h"
 #include "logic/machine.h"
 
+#include "drivers/lcd.h"
+
 // ─────────────────────────────────────────
 // RTOS задача: логіка намотки (ядро 0)
 // ─────────────────────────────────────────
@@ -75,10 +77,27 @@ static void ui_task(void* arg)
 
 extern "C" void app_main(void)
 {
+    // Тільки LCD — без RTOS задач, без motion
+    //lcd_init();
+    //vTaskDelay(pdMS_TO_TICKS(200));
+
+    //lcd_clear();
+    //vTaskDelay(pdMS_TO_TICKS(50));
+
+    //lcd_set_cursor(0, 0);
+    //lcd_print("Hello!");
+
+    // Зупиняємось тут — більше нічого не запускаємо
+    //while(true) {
+        //vTaskDelay(pdMS_TO_TICKS(1000));
+    //}
+
     // Ініціалізація всіх підсистем
     motion_init();   // GPIO кроковиків, розрахунок ratio
     ui_init();       // LCD, енкодер (поки TODO)
     machine_init();  // GPIO педалі з PULLUP
+
+    vTaskDelay(pdMS_TO_TICKS(500)); // дати LCD стабілізуватись
 
     // Запускаємо задачу логіки на ядрі 0
     // Параметри: функція, назва, стек (байт), аргумент, пріоритет, хендл, ядро
