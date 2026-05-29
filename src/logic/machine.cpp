@@ -1,10 +1,8 @@
 // machine.cpp
 //
-// Логіка верхнього рівня намотки.
-//
-// autoReverse = true  → нонстоп: реверсує і мотає далі
-// autoReverse = false → пошаровий: досяг кінця → зупинка
-//   Повторне натискання педалі → мотає зворотній шар → зупинка
+// autoReverse = true  → реверсує і мотає далі (нонстоп)
+// autoReverse = false → досяг кінця → зупинка → чекає
+//                       відпускання педалі і нового натискання
 
 #include "machine.h"
 #include "motion.h"
@@ -25,8 +23,10 @@ static bool     pedalState   = false;
 static bool     lastRawPedal = false;
 static uint32_t pedalDebTime = 0;
 
-// Прапорець що шар завершено — чекаємо відпускання педалі
-// перед стартом наступного шару (пошаровий режим)
+// Прапорець що шар завершено в пошаровому режимі.
+// true = чекаємо відпускання педалі перед стартом наступного шару.
+// Без цього: motion_stop() ще гальмує → running=true →
+// педаль натиснута → motion_start() знову → зупинки немає.
 static bool layerDone = false;
 
 static bool pedal_read()
@@ -56,27 +56,33 @@ void machine_update()
     bool pedal = pedal_read();
 
     shared_lock();
-    bool     running    = shared.running;
-    float    pos        = shared.carriagePos;
-    float    width      = shared.windingWidth;
-    bool     dir        = shared.dirForward;
-    uint32_t speed      = shared.spindleSpeed;
-    float    dia        = shared.wireDiameter;
-    bool     autoRev    = shared.autoReverse;
+    bool     running     = shared.running;
+    float    pos         = shared.carriagePos;
+    float    width       = shared.windingWidth;
+    bool     dir         = shared.dirForward;
+    uint32_t speed       = shared.spindleSpeed;
+    float    dia         = shared.wireDiameter;
+    bool     autoRev     = shared.autoReverse;
+    uint32_t turns       = shared.turns;
+    uint32_t targetTurns = shared.targetTurns;
     shared_unlock();
+
+    // ── Якщо шар завершено — чекаємо відпускання педалі ─────────
+    // Це блокує motion_start() поки педаль не відпустять
+    if (layerDone)
+    {
+        if (!pedal)
+        {
+            // Педаль відпустили — готові до наступного шару
+            layerDone = false;
+        }
+        // Поки педаль натиснута або layerDone — нічого не робимо
+        return;
+    }
 
     // ── Педаль: старт/стоп ───────────────────────────────────────
     if (pedal && !running)
     {
-        // В пошаровому режимі після завершення шару
-        // чекаємо відпускання і повторного натискання
-        if (layerDone)
-        {
-            // Педаль відпускалась після завершення шару?
-            // Так — дозволяємо старт наступного шару
-            layerDone = false;
-        }
-
         motion_set_speed(speed);
         motion_set_wire_diameter(dia);
         motion_start();
@@ -94,7 +100,19 @@ void machine_update()
     if (running)
         motion_set_speed(speed);
 
-    // ── Реверс / зупинка при досягненні межі ─────────────────────
+    // ── Зупинка по кількості витків ──────────────────────────────
+    if (running && targetTurns > 0 && turns >= targetTurns)
+    {
+        motion_stop();
+        layerDone = true;  // чекаємо відпускання педалі
+
+        shared_lock();
+        shared.running = false;
+        shared_unlock();
+        return;
+    }
+
+    // ── Межа шару ────────────────────────────────────────────────
     if (running)
     {
         bool endReached = (dir && pos >= width) || (!dir && pos <= 0.0f);
@@ -103,20 +121,21 @@ void machine_update()
         {
             if (autoRev)
             {
-                // Нонстоп — просто реверсуємо
+                // Нонстоп — реверсуємо і продовжуємо
                 shared_lock();
                 shared.dirForward = !dir;
                 shared_unlock();
             }
             else
             {
-                // Пошаровий — зупиняємо і чекаємо педаль
+                // Пошаровий — зупиняємо і чекаємо відпускання педалі
                 motion_stop();
                 layerDone = true;
 
                 // Змінюємо напрямок для наступного шару
                 shared_lock();
                 shared.dirForward = !dir;
+                shared.running    = false;
                 shared_unlock();
             }
         }
