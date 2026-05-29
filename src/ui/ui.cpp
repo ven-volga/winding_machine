@@ -5,21 +5,23 @@
 //   Col: 01234567890123456789
 //   Row 0: >SPD: 300rpm FWD>>>
 //   Row 1:  TURNS: 0000
-//   Row 2: >POS:   0.00mm
+//   Row 2: >POS:   0.00mm >>>
 //   Row 3: >DIA:0.20  >W: 30.0
 //
-// Параметри курсора:
-//   SPEED     — row 0, col 0
-//   DIRECTION — row 0, col 11
-//   POS       — row 2, col 0  (нове!)
-//   DIAMETER  — row 3, col 0
-//   WIDTH     — row 3, col 11
+// Логіка керування (однакова скрізь):
+//   Крутиш         → обираєш параметр / змінюєш значення
+//   Довгий натиск  → входиш в редагування / зберігаєш
+//   Короткий натиск → виходиш без збереження / виходиш в попереднє меню
 //
-// Логіка POS в EDIT режимі:
-//   Крутиш              → встановлюєш цільове значення (мм)
-//   Утримання 5 сек     → Set Home (carriagePos = 0.0)
-//   Короткий натиск     → скасувати
-//   Довгий натиск       → зберегти і каретка фізично їде туди
+// Підменю POS:
+//   Крутиш         → обираєш пункт (Set value / Set home / Auto rev)
+//   Довгий натиск  → входиш в редагування пункту
+//   Короткий натиск → вихід в головне меню
+//
+//   В редагуванні пункту:
+//   Крутиш         → змінюєш значення
+//   Довгий натиск  → зберегти і вийти з редагування
+//   Короткий натиск → скасувати і вийти з редагування
 
 #include "ui.h"
 #include "encoder.h"
@@ -38,45 +40,61 @@ extern "C" {
 }
 
 // ─────────────────────────────────────────
-// Режими і параметри
+// Режими
 // ─────────────────────────────────────────
 
-typedef enum { UI_VIEW, UI_EDIT } UiMode;
+typedef enum
+{
+    UI_VIEW,           // головний екран
+    UI_EDIT,           // редагування параметра головного меню
+    UI_SUBMENU_POS,    // підменю POS — вибір пункту
+    UI_SUBMENU_EDIT,   // редагування пункту підменю
+} UiMode;
 
 typedef enum
 {
     PARAM_SPEED     = 0,
     PARAM_DIRECTION = 1,
-    PARAM_POS       = 2,  // позиція каретки
+    PARAM_POS       = 2,
     PARAM_DIAMETER  = 3,
     PARAM_WIDTH     = 4,
     PARAM_COUNT     = 5,
 } Param;
 
+typedef enum
+{
+    SUBMENU_SET_VALUE = 0,
+    SUBMENU_SET_HOME  = 1,
+    SUBMENU_AUTO_REV  = 2,
+    SUBMENU_COUNT     = 3,
+} PosSubmenu;
+
 // ─────────────────────────────────────────
 // Стан UI
 // ─────────────────────────────────────────
 
-static UiMode  uiMode        = UI_VIEW;
-static uint8_t selectedParam = PARAM_SPEED;
-static bool    needFullRedraw = true;
+static UiMode  uiMode         = UI_VIEW;
+static uint8_t selectedParam  = PARAM_SPEED;
+static bool    needFullRedraw  = true;
 
-// Буфер редагування
+// Буфер редагування головного меню
 static uint32_t editSpeed = 0;
 static float    editDia   = 0.0f;
 static float    editWidth = 0.0f;
 static bool     editDir   = true;
-static float    editPos   = 0.0f;  // цільова позиція каретки
+
+// Підменю POS
+static uint8_t submenuItem  = SUBMENU_SET_VALUE;
+static float   editPos      = 0.0f;
+static bool    editAutoRev  = true;
 
 // Кеш відображених значень
-static uint32_t lastTurns = 0xFFFFFFFF;
-static float    lastPos   = -9999.0f;
-static uint32_t lastSpeed = 0xFFFFFFFF;
-static bool     lastDir   = true;
-
-// Set Home — час початку утримання кнопки в EDIT POS
-static uint32_t setHomeStartMs = 0;
-static bool     setHomeArmed   = false;
+static uint32_t lastTurns    = 0xFFFFFFFF;
+static float    lastPos      = -9999.0f;
+static uint32_t lastSpeed    = 0xFFFFFFFF;
+static bool     lastDir      = true;
+static bool     lastSvcActive = false;
+static bool     lastSvcDir   = true;
 
 // Позиції курсорів {col, row}
 static const uint8_t CURSOR_POS[PARAM_COUNT][2] =
@@ -97,22 +115,17 @@ static esp_timer_handle_t encoderTimer;
 static void IRAM_ATTR encoder_timer_cb(void* arg)
 {
     encoder_update();
-
     if (encDelta == 0) return;
 
     shared_lock();
     bool running = shared.running;
     shared_unlock();
-
     if (!running) return;
 
-    // Під час намотки — крутіння міняє швидкість
     shared_lock();
     uint32_t spd = shared.spindleSpeed;
-    if (encDelta > 0 && spd < SPINDLE_SPEED_MAX)
-        spd += SPINDLE_SPEED_STEP;
-    if (encDelta < 0 && spd > SPINDLE_SPEED_MIN)
-        spd -= SPINDLE_SPEED_STEP;
+    if (encDelta > 0 && spd < SPINDLE_SPEED_MAX) spd += SPINDLE_SPEED_STEP;
+    if (encDelta < 0 && spd > SPINDLE_SPEED_MIN) spd -= SPINDLE_SPEED_STEP;
     shared.spindleSpeed = spd;
     shared_unlock();
 
@@ -120,7 +133,7 @@ static void IRAM_ATTR encoder_timer_cb(void* arg)
 }
 
 // ─────────────────────────────────────────
-// Функції малювання
+// Малювання головного екрану
 // ─────────────────────────────────────────
 
 static void draw_speed(uint32_t spd)
@@ -149,15 +162,23 @@ static void draw_turns(uint32_t t)
     lastTurns = t;
 }
 
-// Row 2: позиція каретки з курсором
-static void draw_position(float pos)
+static void draw_position_row(float pos, bool svcActive, bool svcDir,
+                               bool running, bool fwd)
 {
+    // Завжди показуємо напрямок:
+    // сервіс активний → напрямок руху каретки зараз
+    // інакше          → dirForward (куди піде при старті)
+    bool showDir  = svcActive ? svcDir : fwd;
+    const char* arrow = showDir ? ">>>" : "<<<";
+
     char buf[21];
-    snprintf(buf, sizeof(buf), " POS:  %6.2fmm     ", pos);
+    snprintf(buf, sizeof(buf), " POS:%6.2fmm %s", pos, arrow);
     buf[20] = '\0';
     lcd_set_cursor(0, 2);
     lcd_print(buf);
-    lastPos = pos;
+    lastPos       = pos;
+    lastSvcActive = svcActive;
+    lastSvcDir    = svcDir;
 }
 
 static void draw_diameter(float dia)
@@ -187,20 +208,67 @@ static void draw_cursor(uint8_t prev)
 static void draw_full_screen(const SharedState& s)
 {
     lcd_clear();
-    lastTurns = 0xFFFFFFFF;
-    lastPos   = -9999.0f;
-    lastSpeed = 0xFFFFFFFF;
-    lastDir   = !s.dirForward;
+    lastTurns     = 0xFFFFFFFF;
+    lastPos       = -9999.0f;
+    lastSpeed     = 0xFFFFFFFF;
+    lastDir       = !s.dirForward;
+    lastSvcActive = false;
 
     draw_speed(s.spindleSpeed);
     draw_direction(s.dirForward);
     draw_turns(s.turns);
-    draw_position(s.carriagePos);
+    draw_position_row(s.carriagePos, s.serviceCarriageActive,
+                      s.serviceCarriageDir, s.running, s.dirForward);
     draw_diameter(s.wireDiameter);
     draw_width(s.windingWidth);
 
     lcd_set_cursor(CURSOR_POS[selectedParam][0], CURSOR_POS[selectedParam][1]);
     lcd_print(">");
+}
+
+// ─────────────────────────────────────────
+// Малювання підменю POS
+// ─────────────────────────────────────────
+
+static void draw_submenu_pos(const SharedState& s, bool editMode)
+{
+    lcd_clear();
+    lcd_set_cursor(0, 0);
+    lcd_print("-- POS SETTINGS --");
+
+    // Рядок 1: Set value
+    {
+        char buf[21];
+        char cursor = (submenuItem == SUBMENU_SET_VALUE) ?
+                      (editMode ? '*' : '>') : ' ';
+        snprintf(buf, sizeof(buf), "%cSet val: %6.1fmm", cursor, editPos);
+        buf[20] = '\0';
+        lcd_set_cursor(0, 1);
+        lcd_print(buf);
+    }
+
+    // Рядок 2: Set home
+    {
+        char buf[21];
+        char cursor = (submenuItem == SUBMENU_SET_HOME) ?
+                      (editMode ? '*' : '>') : ' ';
+        snprintf(buf, sizeof(buf), "%cSet home (0.00mm)", cursor);
+        buf[20] = '\0';
+        lcd_set_cursor(0, 2);
+        lcd_print(buf);
+    }
+
+    // Рядок 3: Auto rev
+    {
+        char buf[21];
+        char cursor = (submenuItem == SUBMENU_AUTO_REV) ?
+                      (editMode ? '*' : '>') : ' ';
+        snprintf(buf, sizeof(buf), "%cAuto rev:     %s",
+                 cursor, editAutoRev ? "ON " : "OFF");
+        buf[20] = '\0';
+        lcd_set_cursor(0, 3);
+        lcd_print(buf);
+    }
 }
 
 // ─────────────────────────────────────────
@@ -235,14 +303,20 @@ void ui_update()
     // ── Повне перемалювання ──────────────────────────────────────
     if (needFullRedraw)
     {
-        draw_full_screen(s);
+        if (uiMode == UI_SUBMENU_POS || uiMode == UI_SUBMENU_EDIT)
+            draw_submenu_pos(s, uiMode == UI_SUBMENU_EDIT);
+        else
+            draw_full_screen(s);
         needFullRedraw = false;
         return;
     }
 
-    // ── VIEW режим ───────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════
+    // VIEW — головний екран
+    // ════════════════════════════════════════════════════════════
     if (uiMode == UI_VIEW)
     {
+        // Крутіння → переміщення курсора (тільки коли стоїть)
         if (encDelta != 0 && !s.running)
         {
             uint8_t prev = selectedParam;
@@ -254,31 +328,54 @@ void ui_update()
             encDelta = 0;
         }
 
+        // Довгий натиск → редагування
         if (evLong)
         {
-            editSpeed = s.spindleSpeed;
-            editDia   = s.wireDiameter;
-            editWidth = s.windingWidth;
-            editDir   = s.dirForward;
-            editPos   = s.carriagePos;
-            setHomeArmed = false;
-            uiMode = UI_EDIT;
-            lcd_set_cursor(CURSOR_POS[selectedParam][0], CURSOR_POS[selectedParam][1]);
-            lcd_print("*");
+            if (selectedParam == PARAM_POS)
+            {
+                // Відкрити підменю POS
+                shared_lock();
+                editPos     = shared.carriagePos;
+                editAutoRev = shared.autoReverse;
+                shared_unlock();
+                submenuItem    = SUBMENU_SET_VALUE;
+                uiMode         = UI_SUBMENU_POS;
+                needFullRedraw = true;
+            }
+            else
+            {
+                editSpeed = s.spindleSpeed;
+                editDia   = s.wireDiameter;
+                editWidth = s.windingWidth;
+                editDir   = s.dirForward;
+                uiMode    = UI_EDIT;
+                lcd_set_cursor(CURSOR_POS[selectedParam][0],
+                               CURSOR_POS[selectedParam][1]);
+                lcd_print("*");
+            }
         }
 
-        if (s.spindleSpeed != lastSpeed) draw_speed(s.spindleSpeed);
-        if (s.dirForward   != lastDir)   draw_direction(s.dirForward);
-        if (s.turns        != lastTurns) draw_turns(s.turns);
-        if (fabsf(s.carriagePos - lastPos) > 0.005f)
-            draw_position(s.carriagePos);
+        // Оновлення динамічних полів
+        if (s.spindleSpeed != lastSpeed)
+            draw_speed(s.spindleSpeed);
+        if (s.dirForward != lastDir)
+            draw_direction(s.dirForward);
+        if (s.turns != lastTurns)
+            draw_turns(s.turns);
+        if (fabsf(s.carriagePos - lastPos) > 0.005f  ||
+            s.serviceCarriageActive != lastSvcActive  ||
+            s.serviceCarriageDir    != lastSvcDir)
+        {
+            draw_position_row(s.carriagePos, s.serviceCarriageActive,
+                              s.serviceCarriageDir, s.running, s.dirForward);
+        }
     }
 
-    // ── EDIT режим ───────────────────────────────────────────────
-    else
+    // ════════════════════════════════════════════════════════════
+    // EDIT — редагування параметра головного меню
+    // ════════════════════════════════════════════════════════════
+    else if (uiMode == UI_EDIT)
     {
-        uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-
         if (encDelta != 0)
         {
             switch (selectedParam)
@@ -290,23 +387,10 @@ void ui_update()
                         editSpeed -= SPINDLE_SPEED_STEP;
                     draw_speed(editSpeed);
                     break;
-
                 case PARAM_DIRECTION:
                     editDir = !editDir;
                     draw_direction(editDir);
                     break;
-
-                case PARAM_POS:
-                    // Крутіння задає цільову позицію
-                    if (encDelta > 0 && editPos < CARRIAGE_POS_MAX)
-                        editPos += CARRIAGE_POS_STEP;
-                    if (encDelta < 0 && editPos > CARRIAGE_POS_MIN)
-                        editPos -= CARRIAGE_POS_STEP;
-                    draw_position(editPos);
-                    // Скидаємо таймер Set Home якщо крутять
-                    setHomeArmed = false;
-                    break;
-
                 case PARAM_DIAMETER:
                     if (encDelta > 0 && editDia < WIRE_DIAMETER_MAX)
                         editDia += WIRE_DIAMETER_STEP;
@@ -314,7 +398,6 @@ void ui_update()
                         editDia -= WIRE_DIAMETER_STEP;
                     draw_diameter(editDia);
                     break;
-
                 case PARAM_WIDTH:
                     if (encDelta > 0 && editWidth < WINDING_WIDTH_MAX)
                         editWidth += WINDING_WIDTH_STEP;
@@ -326,54 +409,15 @@ void ui_update()
             encDelta = 0;
         }
 
-        // ── Set Home для POS ─────────────────────────────────────
-        // Якщо в EDIT POS і тримаємо кнопку 5 секунд — скидаємо позицію
-        if (selectedParam == PARAM_POS)
-        {
-            if (evLong)
-            {
-                // Перший довгий натиск в POS — починаємо відлік
-                if (!setHomeArmed)
-                {
-                    setHomeArmed   = true;
-                    setHomeStartMs = now;
-                    // Показуємо користувачу що відлік пішов
-                    lcd_set_cursor(0, 2);
-                    lcd_print("*HOME 5sec...       ");
-                }
-            }
-
-            if (setHomeArmed && (now - setHomeStartMs) >= SET_HOME_HOLD_MS)
-            {
-                // 5 секунд витримали — Set Home!
-                shared_lock();
-                shared.carriagePos = 0.0f;
-                shared_unlock();
-
-                editPos      = 0.0f;
-                setHomeArmed = false;
-
-                // Показуємо підтвердження
-                lcd_set_cursor(0, 2);
-                lcd_print(" HOME SET!          ");
-                vTaskDelay(pdMS_TO_TICKS(1000));
-
-                uiMode = UI_VIEW;
-                needFullRedraw = true;
-                return;
-            }
-        }
-
-        // Короткий натиск — скасувати
+        // Короткий натиск → скасувати
         if (evClick)
         {
-            setHomeArmed = false;
             uiMode = UI_VIEW;
             needFullRedraw = true;
         }
 
-        // Довгий натиск — зберегти (крім POS де він запускає Set Home)
-        if (evLong && selectedParam != PARAM_POS)
+        // Довгий натиск → зберегти
+        if (evLong)
         {
             shared_lock();
             shared.spindleSpeed = editSpeed;
@@ -381,16 +425,119 @@ void ui_update()
             shared.windingWidth = editWidth;
             shared.dirForward   = editDir;
             shared_unlock();
+            uiMode = UI_VIEW;
+            needFullRedraw = true;
+        }
+    }
 
+    // ════════════════════════════════════════════════════════════
+    // SUBMENU_POS — вибір пункту підменю
+    // ════════════════════════════════════════════════════════════
+    else if (uiMode == UI_SUBMENU_POS)
+    {
+        // Крутіння → навігація між пунктами
+        if (encDelta != 0)
+        {
+            if (encDelta > 0)
+                submenuItem = (submenuItem + 1) % SUBMENU_COUNT;
+            else
+                submenuItem = (submenuItem + SUBMENU_COUNT - 1) % SUBMENU_COUNT;
+            needFullRedraw = true;
+            encDelta = 0;
+        }
+
+        // Короткий натиск → вийти в головне меню
+        if (evClick)
+        {
             uiMode = UI_VIEW;
             needFullRedraw = true;
         }
 
-        // Довгий натиск на POS — запустити переміщення каретки
-        if (evLong && selectedParam == PARAM_POS && !setHomeArmed)
+        // Довгий натиск → увійти в редагування пункту
+        if (evLong)
         {
-            motion_move_to(editPos);
-            uiMode = UI_VIEW;
+            uiMode = UI_SUBMENU_EDIT;
+            needFullRedraw = true;
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // SUBMENU_EDIT — редагування пункту підменю
+    // ════════════════════════════════════════════════════════════
+    else if (uiMode == UI_SUBMENU_EDIT)
+    {
+        if (encDelta != 0)
+        {
+            switch (submenuItem)
+            {
+                case SUBMENU_SET_VALUE:
+                    if (encDelta > 0 && editPos < CARRIAGE_POS_MAX)
+                        editPos += CARRIAGE_POS_STEP;
+                    if (encDelta < 0 && editPos > CARRIAGE_POS_MIN)
+                        editPos -= CARRIAGE_POS_STEP;
+                    break;
+
+                case SUBMENU_AUTO_REV:
+                    editAutoRev = !editAutoRev;
+                    break;
+
+                case SUBMENU_SET_HOME:
+                    // Нічого — тут тільки підтвердження
+                    break;
+            }
+            needFullRedraw = true;
+            encDelta = 0;
+        }
+
+        // Короткий натиск → скасувати, вийти в підменю
+        if (evClick)
+        {
+            // Відновлюємо оригінальні значення
+            shared_lock();
+            editPos     = shared.carriagePos;
+            editAutoRev = shared.autoReverse;
+            shared_unlock();
+            uiMode = UI_SUBMENU_POS;
+            needFullRedraw = true;
+        }
+
+        // Довгий натиск → зберегти і вийти в підменю
+        if (evLong)
+        {
+            switch (submenuItem)
+            {
+                case SUBMENU_SET_VALUE:
+                    // Зберегти autoReverse і запустити переміщення
+                    shared_lock();
+                    shared.autoReverse = editAutoRev;
+                    shared_unlock();
+                    motion_move_to(editPos);
+                    // Повертаємось в головне меню
+                    uiMode = UI_VIEW;
+                    break;
+
+                case SUBMENU_SET_HOME:
+                    // Скинути позицію в 0
+                    shared_lock();
+                    shared.carriagePos = 0.0f;
+                    shared_unlock();
+                    // Підтвердження на екрані
+                    lcd_clear();
+                    lcd_set_cursor(3, 1);
+                    lcd_print("HOME SET!");
+                    lcd_set_cursor(2, 2);
+                    lcd_print("pos = 0.00mm");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    uiMode = UI_VIEW;
+                    break;
+
+                case SUBMENU_AUTO_REV:
+                    shared_lock();
+                    shared.autoReverse = editAutoRev;
+                    shared_unlock();
+                    uiMode = UI_SUBMENU_POS;
+                    break;
+            }
             needFullRedraw = true;
         }
     }

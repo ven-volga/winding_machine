@@ -1,12 +1,10 @@
 // machine.cpp
 //
-// Логіка верхнього рівня намотки:
-//   - педаль: тримаєш → мотає, відпустив → зупиняє
-//   - автоматичний реверс каретки при досягненні windingWidth
-//   - сервісний режим: кнопки мають пріоритет над педаллю
+// Логіка верхнього рівня намотки.
 //
-// Швидкість береться з shared.spindleSpeed —
-// UI змінює її напряму через енкодер під час роботи.
+// autoReverse = true  → нонстоп: реверсує і мотає далі
+// autoReverse = false → пошаровий: досяг кінця → зупинка
+//   Повторне натискання педалі → мотає зворотній шар → зупинка
 
 #include "machine.h"
 #include "motion.h"
@@ -21,36 +19,24 @@ extern "C" {
     #include "driver/gpio.h"
 }
 
-// ─────────────────────────────────────────
-// Debounce педалі
-// ─────────────────────────────────────────
-
 #define PEDAL_DEBOUNCE_MS  30
 
 static bool     pedalState   = false;
 static bool     lastRawPedal = false;
 static uint32_t pedalDebTime = 0;
 
+// Прапорець що шар завершено — чекаємо відпускання педалі
+// перед стартом наступного шару (пошаровий режим)
+static bool layerDone = false;
+
 static bool pedal_read()
 {
     uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     bool raw = (gpio_get_level((gpio_num_t)PEDAL_PIN) == 0);
-
-    if (raw != lastRawPedal)
-    {
-        lastRawPedal = raw;
-        pedalDebTime = now;
-    }
-
-    if ((now - pedalDebTime) >= PEDAL_DEBOUNCE_MS)
-        pedalState = raw;
-
+    if (raw != lastRawPedal) { lastRawPedal = raw; pedalDebTime = now; }
+    if ((now - pedalDebTime) >= PEDAL_DEBOUNCE_MS) pedalState = raw;
     return pedalState;
 }
-
-// ─────────────────────────────────────────
-// Публічні функції
-// ─────────────────────────────────────────
 
 void machine_init()
 {
@@ -65,25 +51,32 @@ void machine_init()
 
 void machine_update()
 {
-    // Сервісний режим має пріоритет
     if (service_active()) return;
 
     bool pedal = pedal_read();
 
-    // Читаємо параметри з shared
     shared_lock();
-    bool     running = shared.running;
-    float    pos     = shared.carriagePos;
-    float    width   = shared.windingWidth;
-    bool     dir     = shared.dirForward;
-    uint32_t speed   = shared.spindleSpeed;
-    float    dia     = shared.wireDiameter;
+    bool     running    = shared.running;
+    float    pos        = shared.carriagePos;
+    float    width      = shared.windingWidth;
+    bool     dir        = shared.dirForward;
+    uint32_t speed      = shared.spindleSpeed;
+    float    dia        = shared.wireDiameter;
+    bool     autoRev    = shared.autoReverse;
     shared_unlock();
 
     // ── Педаль: старт/стоп ───────────────────────────────────────
     if (pedal && !running)
     {
-        // Передаємо актуальні параметри в motion перед стартом
+        // В пошаровому режимі після завершення шару
+        // чекаємо відпускання і повторного натискання
+        if (layerDone)
+        {
+            // Педаль відпускалась після завершення шару?
+            // Так — дозволяємо старт наступного шару
+            layerDone = false;
+        }
+
         motion_set_speed(speed);
         motion_set_wire_diameter(dia);
         motion_start();
@@ -95,30 +88,37 @@ void machine_update()
     else if (!pedal && running)
     {
         motion_stop();
-        // shared.running скинеться в motion після гальмування
     }
 
-    // ── Оновлення швидкості під час роботи ──────────────────────
-    // UI змінює shared.spindleSpeed через енкодер —
-    // передаємо нове значення в motion плавно
+    // Оновлення швидкості під час роботи
     if (running)
         motion_set_speed(speed);
 
-    // ── Автоматичний реверс каретки ──────────────────────────────
+    // ── Реверс / зупинка при досягненні межі ─────────────────────
     if (running)
     {
-        bool needReverse = false;
+        bool endReached = (dir && pos >= width) || (!dir && pos <= 0.0f);
 
-        if (dir && pos >= width)
-            needReverse = true;
-        else if (!dir && pos <= 0.0f)
-            needReverse = true;
-
-        if (needReverse)
+        if (endReached)
         {
-            shared_lock();
-            shared.dirForward = !dir;
-            shared_unlock();
+            if (autoRev)
+            {
+                // Нонстоп — просто реверсуємо
+                shared_lock();
+                shared.dirForward = !dir;
+                shared_unlock();
+            }
+            else
+            {
+                // Пошаровий — зупиняємо і чекаємо педаль
+                motion_stop();
+                layerDone = true;
+
+                // Змінюємо напрямок для наступного шару
+                shared_lock();
+                shared.dirForward = !dir;
+                shared_unlock();
+            }
         }
     }
 }

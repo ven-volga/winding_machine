@@ -36,7 +36,7 @@ static void ui_task(void*)
     while (true)
     {
         ui_update();
-        vTaskDelay(pdMS_TO_TICKS(50)); // LCD кожні 50мс
+        vTaskDelay(pdMS_TO_TICKS(5)); // LCD кожні 5мс
     }
 }
 

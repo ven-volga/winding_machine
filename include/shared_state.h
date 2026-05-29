@@ -15,24 +15,32 @@ struct SharedState
 {
     // ── UI → motion ──────────────────────────────────────────────
 
-    uint32_t spindleSpeed = 300;    // об/хв
-    float    wireDiameter = 0.20f;  // мм
-    float    windingWidth = 30.0f;  // мм
+    uint32_t spindleSpeed = 300;
+    float    wireDiameter = 0.20f;
+    float    windingWidth = 30.0f;
     bool     dirForward   = true;
     bool     running      = false;
 
-    // ── Позиціювання каретки ─────────────────────────────────────
-    // Коли moveToActive = true — motion ігнорує педаль і
-    // переміщує каретку до targetPos на фіксованій швидкості.
-    // Після досягнення — скидає moveToActive в false.
+    // Автореверс:
+    //   true  = нонстоп (мотає поки педаль натиснута)
+    //   false = пошаровий (один шар → стоп → педаль → зворотній шар → стоп)
+    bool     autoReverse  = true;
 
-    bool     moveToActive = false;  // активне переміщення до позиції
-    float    targetPos    = 0.0f;   // ціль переміщення (мм)
+    // ── Позиціювання каретки ─────────────────────────────────────
+
+    bool     moveToActive = false;
+    float    targetPos    = 0.0f;
 
     // ── motion → UI ──────────────────────────────────────────────
 
-    uint32_t turns       = 0;       // лічильник витків
-    float    carriagePos = 0.0f;    // поточна позиція каретки (мм)
+    uint32_t turns        = 0;
+    float    carriagePos  = 0.0f;
+
+    // Напрямок руху каретки в сервісному режимі.
+    // Оновлюється в service.cpp при кожному кроці.
+    // UI показує стрілку на основі цього поля.
+    bool     serviceCarriageDir = true;  // true = вправо, false = вліво
+    bool     serviceCarriageActive = false; // чи рухається каретка зараз
 };
 
 extern SharedState       shared;
