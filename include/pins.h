@@ -1,38 +1,58 @@
 #pragma once
 
-// =========================
-// SPINDLE DRIVER
-// =========================
+// =============================================================
+// pins.h — всі GPIO піни проєкту
+// =============================================================
 
-#define SPINDLE_STEP_PIN 25
-#define SPINDLE_DIR_PIN  26
-#define SPINDLE_EN_PIN   27
+// ─────────────────────────────────────────
+// ШПИНДЕЛЬ (TMC2209)
+// ─────────────────────────────────────────
 
-// =========================
-// CARRIAGE DRIVER
-// =========================
+#define SPINDLE_STEP_PIN    25
+#define SPINDLE_DIR_PIN     26
+#define SPINDLE_EN_PIN      27
 
-#define CARRIAGE_STEP_PIN 14
-#define CARRIAGE_DIR_PIN  12
-#define CARRIAGE_EN_PIN   13
+// ─────────────────────────────────────────
+// УКЛАДЧИК (TMC2209)
+// ─────────────────────────────────────────
 
-// =========================
-// UI
-// =========================
+#define CARRIAGE_STEP_PIN   14
+#define CARRIAGE_DIR_PIN    12
+#define CARRIAGE_EN_PIN     13
 
-#define ENCODER_A_PIN     32
-#define ENCODER_B_PIN     33
-#define ENCODER_BTN_PIN   19
+// ─────────────────────────────────────────
+// UI — енкодер і педаль
+// ─────────────────────────────────────────
 
-#define PEDAL_PIN         18
-#define MANUAL_DIR_PIN    5
+#define ENCODER_A_PIN       32
+#define ENCODER_B_PIN       33
+#define ENCODER_BTN_PIN     19
 
-// =========================
-// FUTURE
-// =========================
+#define PEDAL_PIN           18
 
-#define HALL_A_PIN        34
-#define HALL_B_PIN        35
+// ─────────────────────────────────────────
+// СЕРВІСНИЙ РЕЖИМ — 4 кнопки
+//
+// Активні тільки коли педаль НЕ натиснута.
+// Тримаєш → рухається, відпустив → стоп.
+// Швидкість береться з shared.spindleSpeed (енкодер).
+// ─────────────────────────────────────────
 
-#define LIMIT_LEFT_PIN    16
-#define LIMIT_RIGHT_PIN   17
+#define BTN_SPINDLE_CW      4   // шпиндель за годинниковою
+#define BTN_SPINDLE_CCW     5   // шпиндель проти годинникової
+#define BTN_CARRIAGE_LEFT   23  // каретка вліво
+#define BTN_CARRIAGE_RIGHT  15  // каретка вправо
+
+// ─────────────────────────────────────────
+// ДАТЧИКИ ХОЛЛА (зарезервовано)
+// ─────────────────────────────────────────
+
+#define HALL_A_PIN          34  // input only
+#define HALL_B_PIN          35  // input only
+
+// ─────────────────────────────────────────
+// КІНЦЕВИКИ КАРЕТКИ (зарезервовано)
+// ─────────────────────────────────────────
+
+#define LIMIT_LEFT_PIN      16
+#define LIMIT_RIGHT_PIN     17

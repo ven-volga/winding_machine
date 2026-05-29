@@ -1,118 +1,124 @@
 // machine.cpp
 //
-// Логіка верхнього рівня машини:
-// - ініціалізація педалі
-// - debounce педалі
-// - старт/стоп руху
+// Логіка верхнього рівня намотки:
+//   - педаль: тримаєш → мотає, відпустив → зупиняє
+//   - автоматичний реверс каретки при досягненні windingWidth
+//   - сервісний режим: кнопки мають пріоритет над педаллю
 //
-// machine_update() викликається з RTOS задачі на ядрі 0 (main.cpp).
+// Швидкість береться з shared.spindleSpeed —
+// UI змінює її напряму через енкодер під час роботи.
 
 #include "machine.h"
-#include "machine_state.h"
-#include "motion/motion.h"
+#include "motion.h"
+#include "service.h"
+#include "shared_state.h"
 #include "pins.h"
+#include "config.h"
 
-#include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-// ─────────────────────────────────────────
-// Налаштування debounce
-// ─────────────────────────────────────────
-
-// Скільки мілісекунд сигнал має бути стабільним
-// щоб ми його прийняли як реальний стан педалі.
-// 30 мс — достатньо для механічного контакту.
-#define DEBOUNCE_MS 30
-
-// Поточний підтверджений стан педалі
-static bool pedalState = false;
-
-// Час (мс) коли педаль востаннє змінила стан
-static uint32_t lastChangeTime = 0;
-
-// Сирий стан педалі на попередній ітерації
-static bool lastRawState = false;
-
-// ─────────────────────────────────────────
-// machine_init
-// ─────────────────────────────────────────
-
-void machine_init()
-{
-    // Налаштовуємо GPIO педалі:
-    // - вхід
-    // - внутрішня підтяжка до VCC (PULLUP)
-    //
-    // Це означає що коли педаль НЕ натиснута — на піні HIGH.
-    // Коли педаль натиснута (замикає на GND) — на піні LOW.
-    // Тобто логіка інвертована: LOW = натиснута.
-
-    gpio_config_t pedal_conf = {
-        .pin_bit_mask = (1ULL << PEDAL_PIN),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&pedal_conf);
+extern "C" {
+    #include "freertos/FreeRTOS.h"
+    #include "freertos/task.h"
+    #include "driver/gpio.h"
 }
 
 // ─────────────────────────────────────────
-// pedal_debounced
-//
-// Повертає true якщо педаль натиснута (після debounce).
-// Викликати кожну ітерацію machine_update().
+// Debounce педалі
 // ─────────────────────────────────────────
 
-static bool pedal_debounced()
+#define PEDAL_DEBOUNCE_MS  30
+
+static bool     pedalState   = false;
+static bool     lastRawPedal = false;
+static uint32_t pedalDebTime = 0;
+
+static bool pedal_read()
 {
-    // Читаємо сирий сигнал.
-    // LOW = натиснута (бо PULLUP + замикання на GND).
+    uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     bool raw = (gpio_get_level((gpio_num_t)PEDAL_PIN) == 0);
 
-    uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-
-    if (raw != lastRawState)
+    if (raw != lastRawPedal)
     {
-        // Сигнал змінився — запам'ятовуємо час зміни
-        lastRawState = raw;
-        lastChangeTime = now;
+        lastRawPedal = raw;
+        pedalDebTime = now;
     }
 
-    // Якщо сигнал стабільний довше DEBOUNCE_MS — приймаємо його
-    if ((now - lastChangeTime) >= DEBOUNCE_MS)
-    {
+    if ((now - pedalDebTime) >= PEDAL_DEBOUNCE_MS)
         pedalState = raw;
-    }
 
     return pedalState;
 }
 
 // ─────────────────────────────────────────
-// machine_update
-//
-// Викликається кожні ~10 мс з RTOS задачі.
+// Публічні функції
 // ─────────────────────────────────────────
+
+void machine_init()
+{
+    gpio_config_t conf = {};
+    conf.pin_bit_mask  = (1ULL << PEDAL_PIN);
+    conf.mode          = GPIO_MODE_INPUT;
+    conf.pull_up_en    = GPIO_PULLUP_ENABLE;
+    conf.pull_down_en  = GPIO_PULLDOWN_DISABLE;
+    conf.intr_type     = GPIO_INTR_DISABLE;
+    gpio_config(&conf);
+}
 
 void machine_update()
 {
-    bool pressed = pedal_debounced();
+    // Сервісний режим має пріоритет
+    if (service_active()) return;
 
-    if (pressed)
+    bool pedal = pedal_read();
+
+    // Читаємо параметри з shared
+    shared_lock();
+    bool     running = shared.running;
+    float    pos     = shared.carriagePos;
+    float    width   = shared.windingWidth;
+    bool     dir     = shared.dirForward;
+    uint32_t speed   = shared.spindleSpeed;
+    float    dia     = shared.wireDiameter;
+    shared_unlock();
+
+    // ── Педаль: старт/стоп ───────────────────────────────────────
+    if (pedal && !running)
     {
-        // Педаль затиснута — запускаємо рух
+        // Передаємо актуальні параметри в motion перед стартом
+        motion_set_speed(speed);
+        motion_set_wire_diameter(dia);
         motion_start();
+
+        shared_lock();
+        shared.running = true;
+        shared_unlock();
     }
-    else
+    else if (!pedal && running)
     {
-        // Педаль відпущена — зупиняємо
         motion_stop();
+        // shared.running скинеться в motion після гальмування
     }
 
-    // TODO (наступні кроки):
-    // - автоматичний реверс каретки при досягненні windingWidth
-    // - лічильник витків
-    // - homing
-    // - обробка кінцевиків
+    // ── Оновлення швидкості під час роботи ──────────────────────
+    // UI змінює shared.spindleSpeed через енкодер —
+    // передаємо нове значення в motion плавно
+    if (running)
+        motion_set_speed(speed);
+
+    // ── Автоматичний реверс каретки ──────────────────────────────
+    if (running)
+    {
+        bool needReverse = false;
+
+        if (dir && pos >= width)
+            needReverse = true;
+        else if (!dir && pos <= 0.0f)
+            needReverse = true;
+
+        if (needReverse)
+        {
+            shared_lock();
+            shared.dirForward = !dir;
+            shared_unlock();
+        }
+    }
 }

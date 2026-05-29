@@ -1,113 +1,72 @@
 // main.cpp
 //
-// Точка входу програми.
+// Точка входу.
 //
-// Архітектура двох ядер ESP32:
+// Ядро 0 — motion_task:
+//   service_update() — сервісні кнопки
+//   machine_update() — педаль, реверс, швидкість
+//   motion_update()  — кроки, синхронізація
 //
-//   Ядро 0 — motion_task (логіка намотки)
-//   ├── machine_update()  — педаль, старт/стоп, реверс, лічильники
-//   └── motion_update()   — генерація кроків, синхронізація каретки
-//
-//   Ядро 1 — ui_task (інтерфейс)
-//   └── ui_update()       — дисплей 2004, енкодер
-//
-// Чому так?
-//   motion_update() використовує busy-wait (esp_rom_delay_us) для точного
-//   тайменгу кроків — це блокує ядро. Якби UI був на тому ж ядрі,
-//   дисплей і енкодер підвисали б під час намотки.
-//   Розділення на ядра вирішує цю проблему повністю.
-//
-// Пріоритети:
-//   motion_task — пріоритет 5 (вищий), час критичний
-//   ui_task     — пріоритет 3 (нижчий), може трохи запізнитись
+// Ядро 1 — ui_task:
+//   esp_timer (1мс)  — опитування енкодера, зміна швидкості
+//   ui_update (50мс) — LCD оновлення
 
-#include <stdio.h>
+#include "ui.h"
+#include "motion.h"
+#include "machine.h"
+#include "service.h"
+#include "shared_state.h"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "motion/motion.h"
-#include "ui/ui.h"
-#include "logic/machine.h"
-
-#include "drivers/lcd.h"
-#include <config.h>
+extern "C" {
+    #include "freertos/FreeRTOS.h"
+    #include "freertos/task.h"
+}
 
 // ─────────────────────────────────────────
-// RTOS задача: логіка намотки (ядро 0)
+// UI задача — ядро 1
+//
+// Енкодер опитується окремим esp_timer (1мс) — у ui_init().
+// Тут тільки LCD оновлення кожні 50мс.
 // ─────────────────────────────────────────
 
-static void motion_task(void* arg)
+static void ui_task(void*)
 {
+    ui_init(); // запускає і LCD і таймер енкодера
+
     while (true)
     {
-        // machine_update: перевіряє педаль, керує станом
+        ui_update();
+        vTaskDelay(pdMS_TO_TICKS(50)); // LCD кожні 50мс
+    }
+}
+
+// ─────────────────────────────────────────
+// Motion задача — ядро 0
+// ─────────────────────────────────────────
+
+static void motion_task(void*)
+{
+    service_init();
+    machine_init();
+    motion_init();
+
+    while (true)
+    {
+        service_update();
         machine_update();
-
-        // motion_update: якщо running — крок шпинделя + крок каретки
-        // всередині є esp_rom_delay_us — сам регулює темп
         motion_update();
-
-        // Коротка пауза щоб watchdog не спрацював
-        // в machine_update є debounce затримка 10 мс,
-        // але при зупиненій машині motion_update нічого не робить —
-        // тому тут даємо мінімальний yield планувальнику
         taskYIELD();
     }
 }
 
 // ─────────────────────────────────────────
-// RTOS задача: UI (ядро 1)
+// app_main
 // ─────────────────────────────────────────
 
-static void ui_task(void* arg)
+extern "C" void app_main()
 {
-    while (true)
-    {
-        // Оновлення дисплею і обробка енкодера
-        ui_update();
+    shared_state_init();
 
-        // Оновлюємо UI кожні UI_REFRESH_MS мс (задано в config.h)
-        vTaskDelay(pdMS_TO_TICKS(UI_REFRESH_MS));
-    }
-}
-
-// ─────────────────────────────────────────
-// app_main — викликається один раз при старті
-// ─────────────────────────────────────────
-
-extern "C" void app_main(void)
-{
-    // Ініціалізація всіх підсистем
-    motion_init();   // GPIO кроковиків, розрахунок ratio
-    ui_init();       // LCD, енкодер (поки TODO)
-    machine_init();  // GPIO педалі з PULLUP
-
-    vTaskDelay(pdMS_TO_TICKS(500)); // дати LCD стабілізуватись
-
-    // Запускаємо задачу логіки на ядрі 0
-    // Параметри: функція, назва, стек (байт), аргумент, пріоритет, хендл, ядро
-    xTaskCreatePinnedToCore(
-        motion_task,   // функція задачі
-        "motion",      // назва (для відладки)
-        8192,          // розмір стеку в байтах
-        NULL,          // аргумент (не потрібен)
-        5,             // пріоритет (вищий)
-        NULL,          // хендл задачі (не зберігаємо)
-        0              // ядро 0
-    );
-
-    // Запускаємо задачу UI на ядрі 1
-    xTaskCreatePinnedToCore(
-        ui_task,       // функція задачі
-        "ui",          // назва
-        8192,          // стек
-        NULL,          // аргумент
-        3,             // пріоритет (нижчий)
-        NULL,          // хендл
-        1              // ядро 1
-    );
-
-    // app_main завершується — це нормально для ESP-IDF.
-    // RTOS задачі продовжують працювати незалежно.
+    xTaskCreatePinnedToCore(ui_task,     "ui",     8192, nullptr, 3, nullptr, 1);
+    xTaskCreatePinnedToCore(motion_task, "motion", 4096, nullptr, 5, nullptr, 0);
 }
