@@ -305,6 +305,14 @@ void ui_update()
     s = shared;
     shared_unlock();
 
+    // Читаємо і скидаємо прапорці кнопки одразу
+    // Це гарантує що кожна подія обробляється тільки один раз
+    // навіть якщо таймер встиг викликати encoder_update кілька разів
+    bool click    = evClick;
+    bool longPress = evLong;
+    evClick = false;
+    evLong  = false;
+
     if (needFullRedraw)
     {
         if (uiMode == UI_SUBMENU_POS || uiMode == UI_SUBMENU_EDIT)
@@ -346,7 +354,7 @@ void ui_update()
             draw_cursor(prev);
         }
 
-        if (evLong)
+        if (longPress)
         {
             if (selectedParam == PARAM_POS)
             {
@@ -472,13 +480,13 @@ void ui_update()
             
         }
 
-        if (evClick)
+        if (click)
         {
             uiMode = UI_VIEW;
             needFullRedraw = true;
         }
 
-        if (evLong)
+        if (longPress)
         {
             shared_lock();
             shared.spindleSpeed  = editSpeed;
@@ -510,13 +518,13 @@ void ui_update()
             
         }
 
-        if (evClick)
+        if (click)
         {
             uiMode = UI_VIEW;
             needFullRedraw = true;
         }
 
-        if (evLong)
+        if (longPress)
         {
             uiMode = UI_SUBMENU_EDIT;
             needFullRedraw = true;
@@ -552,7 +560,7 @@ void ui_update()
         }
 
         // Короткий натиск → скасувати, повернутись в підменю
-        if (evClick)
+        if (click)
         {
             shared_lock();
             editPos     = shared.carriagePos;
@@ -563,7 +571,7 @@ void ui_update()
         }
 
         // Довгий натиск → зберегти
-        if (evLong)
+        if (longPress)
         {
             switch (submenuItem)
             {
