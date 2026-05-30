@@ -111,11 +111,11 @@ static uint32_t lastTurnsEditMs  = 0;
 static const uint8_t CURSOR_POS[PARAM_COUNT][2] =
 {
     {0,  0},   // SPEED
-    {11, 0},   // DIRECTION  ← зсунуто з 11 на 11 (текст з 12)
+    {12, 0},   // DIRECTION (курсор col 12, текст col 13)
     {0,  1},   // TURNS
     {0,  2},   // POS
     {0,  3},   // DIAMETER
-    {10, 3},   // WIDTH      ← зсунуто з 11 на 10 (текст з 11)
+    {11, 3},   // WIDTH (курсор col 11, текст col 12)
 };
 
 // ─────────────────────────────────────────
@@ -157,10 +157,10 @@ static void draw_speed(uint32_t spd)
     lastSpeed = spd;
 }
 
-// FWD/REV — зсунуто на 1 вправо (курсор col 11, текст col 12)
+// FWD/REV (курсор col 12, текст col 13)
 static void draw_direction(bool fwd)
 {
-    lcd_set_cursor(12, 0);
+    lcd_set_cursor(13, 0);
     lcd_print(fwd ? "FWD>>>" : "REV<<<");
     lastDir = fwd;
 }
@@ -215,12 +215,12 @@ static void draw_diameter(float dia)
     lcd_print(buf);
 }
 
-// W — зсунуто на 1 вправо (курсор col 10, текст col 11)
+// W (курсор col 11, текст col 12)
 static void draw_width(float w)
 {
     char buf[9];
     snprintf(buf, sizeof(buf), "W:%5.1f", w);
-    lcd_set_cursor(11, 3);
+    lcd_set_cursor(12, 3);
     lcd_print(buf);
 }
 
