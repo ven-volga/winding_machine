@@ -1,6 +1,15 @@
 #pragma once
 
+// =============================================================
+// shared_state.h — спільний стан між ядрами
+//
+// shared_lock() тепер повертає bool і логує таймаут.
+// На етапі налагодження це допомагає ловити дедлоки.
+// Після стабілізації можна повернути portMAX_DELAY.
+// =============================================================
+
 #include <cstdint>
+#include <cstdio>
 
 extern "C" {
     #include "freertos/FreeRTOS.h"
@@ -17,9 +26,7 @@ struct SharedState
     bool     dirForward   = true;
     bool     running      = false;
     bool     autoReverse  = true;
-
-    // Кількість витків для намотки (задається в UI)
-    uint32_t targetTurns  = 0;      // 0 = не задано (мотає без ліміту)
+    uint32_t targetTurns  = 0;
 
     // ── Позиціювання ─────────────────────────────────────────────
 
@@ -31,7 +38,8 @@ struct SharedState
     uint32_t turns        = 0;
     float    carriagePos  = 0.0f;
 
-    // Сервісний режим
+    // ── Сервісний режим ──────────────────────────────────────────
+
     bool     serviceCarriageDir    = true;
     bool     serviceCarriageActive = false;
 };
@@ -39,7 +47,20 @@ struct SharedState
 extern SharedState       shared;
 extern SemaphoreHandle_t sharedMutex;
 
-inline void shared_lock()   { xSemaphoreTake(sharedMutex, portMAX_DELAY); }
-inline void shared_unlock() { xSemaphoreGive(sharedMutex); }
+// shared_lock з таймаутом 100мс для налагодження.
+// Якщо таймаут — логує помилку і повертає false.
+// Завжди перевіряй повернуте значення в критичних місцях.
+inline bool shared_lock()
+{
+    if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+        return true;
+    printf("[ERROR] shared_lock timeout! Check for deadlock.\n");
+    return false;
+}
+
+inline void shared_unlock()
+{
+    xSemaphoreGive(sharedMutex);
+}
 
 void shared_state_init();

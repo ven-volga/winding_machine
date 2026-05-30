@@ -124,24 +124,12 @@ static const uint8_t CURSOR_POS[PARAM_COUNT][2] =
 
 static esp_timer_handle_t encoderTimer;
 
+// Таймер ТІЛЬКИ читає енкодер і накопичує кроки в encSteps.
+// Ніякої бізнес-логіки, ніяких mutex, ніяких shared.
+// Вся обробка — в ui_update().
 static void IRAM_ATTR encoder_timer_cb(void* arg)
 {
     encoder_update();
-    if (encDelta == 0) return;
-
-    shared_lock();
-    bool running = shared.running;
-    shared_unlock();
-    if (!running) return;
-
-    shared_lock();
-    uint32_t spd = shared.spindleSpeed;
-    if (encDelta > 0 && spd < SPINDLE_SPEED_MAX) spd += SPINDLE_SPEED_STEP;
-    if (encDelta < 0 && spd > SPINDLE_SPEED_MIN) spd -= SPINDLE_SPEED_STEP;
-    shared.spindleSpeed = spd;
-    shared_unlock();
-
-    encDelta = 0;
 }
 
 // ─────────────────────────────────────────
@@ -332,15 +320,30 @@ void ui_update()
     // ════════════════════════════════════════════════════════════
     if (uiMode == UI_VIEW)
     {
-        if (encDelta != 0 && !s.running)
+        // Читаємо і скидаємо накопичувач атомарно
+        int32_t steps = encSteps;
+        encSteps = 0;
+
+        // Під час намотки — крутіння міняє швидкість напряму
+        if (steps != 0 && s.running)
+        {
+            shared_lock();
+            uint32_t spd = shared.spindleSpeed;
+            if (steps > 0 && spd < SPINDLE_SPEED_MAX) spd += SPINDLE_SPEED_STEP;
+            if (steps < 0 && spd > SPINDLE_SPEED_MIN) spd -= SPINDLE_SPEED_STEP;
+            shared.spindleSpeed = spd;
+            shared_unlock();
+            steps = 0;
+        }
+
+        if (steps != 0 && !s.running)
         {
             uint8_t prev = selectedParam;
-            if (encDelta > 0)
+            if (steps > 0)
                 selectedParam = (selectedParam + 1) % PARAM_COUNT;
             else
                 selectedParam = (selectedParam + PARAM_COUNT - 1) % PARAM_COUNT;
             draw_cursor(prev);
-            encDelta = 0;
         }
 
         if (evLong)
@@ -391,16 +394,20 @@ void ui_update()
     // ════════════════════════════════════════════════════════════
     else if (uiMode == UI_EDIT)
     {
-        if (encDelta != 0)
+        // Читаємо накопичувач (в VIEW вже міг скинути, тут свіжий)
+        int32_t steps = encSteps;
+        encSteps = 0;
+
+        if (steps != 0)
         {
             uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
             switch (selectedParam)
             {
                 case PARAM_SPEED:
-                    if (encDelta > 0 && editSpeed < SPINDLE_SPEED_MAX)
+                    if (steps > 0 && editSpeed < SPINDLE_SPEED_MAX)
                         editSpeed += SPINDLE_SPEED_STEP;
-                    if (encDelta < 0 && editSpeed > SPINDLE_SPEED_MIN)
+                    if (steps < 0 && editSpeed > SPINDLE_SPEED_MIN)
                         editSpeed -= SPINDLE_SPEED_STEP;
                     draw_speed(editSpeed);
                     break;
@@ -419,7 +426,7 @@ void ui_update()
                     else if (elapsed < 100) step = 10;
                     lastTurnsEditMs = now;
 
-                    if (encDelta > 0)
+                    if (steps > 0)
                         editTargetTurns = (editTargetTurns + step > 9999) ?
                                            9999 : editTargetTurns + step;
                     else
@@ -447,22 +454,22 @@ void ui_update()
                 }
 
                 case PARAM_DIAMETER:
-                    if (encDelta > 0 && editDia < WIRE_DIAMETER_MAX)
+                    if (steps > 0 && editDia < WIRE_DIAMETER_MAX)
                         editDia += WIRE_DIAMETER_STEP;
-                    if (encDelta < 0 && editDia > WIRE_DIAMETER_MIN)
+                    if (steps < 0 && editDia > WIRE_DIAMETER_MIN)
                         editDia -= WIRE_DIAMETER_STEP;
                     draw_diameter(editDia);
                     break;
 
                 case PARAM_WIDTH:
-                    if (encDelta > 0 && editWidth < WINDING_WIDTH_MAX)
+                    if (steps > 0 && editWidth < WINDING_WIDTH_MAX)
                         editWidth += WINDING_WIDTH_STEP;
-                    if (encDelta < 0 && editWidth > WINDING_WIDTH_MIN)
+                    if (steps < 0 && editWidth > WINDING_WIDTH_MIN)
                         editWidth -= WINDING_WIDTH_STEP;
                     draw_width(editWidth);
                     break;
             }
-            encDelta = 0;
+            
         }
 
         if (evClick)
@@ -490,14 +497,17 @@ void ui_update()
     // ════════════════════════════════════════════════════════════
     else if (uiMode == UI_SUBMENU_POS)
     {
-        if (encDelta != 0)
+        int32_t steps = encSteps;
+        encSteps = 0;
+
+        if (steps != 0)
         {
-            if (encDelta > 0)
+            if (steps > 0)
                 submenuItem = (submenuItem + 1) % SUBMENU_COUNT;
             else
                 submenuItem = (submenuItem + SUBMENU_COUNT - 1) % SUBMENU_COUNT;
             needFullRedraw = true;
-            encDelta = 0;
+            
         }
 
         if (evClick)
@@ -518,14 +528,17 @@ void ui_update()
     // ════════════════════════════════════════════════════════════
     else if (uiMode == UI_SUBMENU_EDIT)
     {
-        if (encDelta != 0)
+        int32_t steps = encSteps;
+        encSteps = 0;
+
+        if (steps != 0)
         {
             switch (submenuItem)
             {
                 case SUBMENU_SET_VALUE:
-                    if (encDelta > 0 && editPos < CARRIAGE_POS_MAX)
+                    if (steps > 0 && editPos < CARRIAGE_POS_MAX)
                         editPos += CARRIAGE_POS_STEP;
-                    if (encDelta < 0 && editPos > CARRIAGE_POS_MIN)
+                    if (steps < 0 && editPos > CARRIAGE_POS_MIN)
                         editPos -= CARRIAGE_POS_STEP;
                     break;
                 case SUBMENU_AUTO_REV:
@@ -535,7 +548,7 @@ void ui_update()
                     break;
             }
             needFullRedraw = true;
-            encDelta = 0;
+            
         }
 
         // Короткий натиск → скасувати, повернутись в підменю

@@ -2,19 +2,17 @@
 //
 // Квадратурний енкодер з кнопкою через polling.
 //
-// Підключення:
-//   A   → ENCODER_A_PIN   (PULLUP)
-//   B   → ENCODER_B_PIN   (PULLUP)
-//   BTN → ENCODER_BTN_PIN (PULLUP, замикає на GND)
-//   GND → GND
+// Архітектура:
+//   encoder_update() викликається з esp_timer кожну 1мс.
+//   Функція ТІЛЬКИ читає стан пінів і накопичує кроки.
+//   Ніякої бізнес-логіки, ніяких mutex, ніяких shared.
 //
-// Рекомендація по залізу:
-//   0.1мкФ кераміка між A і GND, між B і GND —
-//   прибирає більшість механічного брязкоту.
+//   UI цикл (ui_update) читає накопичені кроки і події кнопки,
+//   потім вирішує що з ними робити.
 
 #include "encoder.h"
-#include "../../include/pins.h"
-#include "../../include/config.h"
+#include "pins.h"
+#include "config.h"
 
 extern "C" {
     #include "freertos/FreeRTOS.h"
@@ -24,9 +22,8 @@ extern "C" {
 
 // ─────────────────────────────────────────
 // Gray-code таблиця переходів
-//
 // Індекс: (prev_state << 2) | curr_state
-// +1 = CW (вправо), -1 = CCW (вліво), 0 = шум
+// +1 = CW, -1 = CCW, 0 = шум
 // ─────────────────────────────────────────
 
 static const int8_t ENCODER_TABLE[16] =
@@ -41,9 +38,22 @@ static const int8_t ENCODER_TABLE[16] =
 // Стан енкодера
 // ─────────────────────────────────────────
 
-static uint8_t  encoderState     = 0;
-static int8_t   encoderAccum     = 0;
-static uint32_t lastStepMs       = 0;
+static uint8_t  encoderState = 0;
+static int8_t   encoderAccum = 0;   // накопичувач до порогу 4
+static uint32_t lastStepMs   = 0;
+
+// ─────────────────────────────────────────
+// Публічні змінні
+//
+// encSteps — volatile int32_t накопичувач.
+//   Таймер пише, UI читає і скидає.
+//   Використовуємо int32_t щоб не губити кроки
+//   при швидкому крутінні.
+// ─────────────────────────────────────────
+
+volatile int32_t encSteps = 0;
+bool             evClick  = false;
+bool             evLong   = false;
 
 // ─────────────────────────────────────────
 // Стан кнопки
@@ -54,19 +64,11 @@ typedef enum
     BTN_IDLE,
     BTN_DEBOUNCE_PRESS,
     BTN_PRESSED,
-    BTN_LONG_SENT,      // довгий вже відправлено, чекаємо відпускання
+    BTN_LONG_SENT,
 } BtnState;
 
 static BtnState btnState = BTN_IDLE;
 static uint32_t btnTimer = 0;
-
-// ─────────────────────────────────────────
-// Публічні змінні — результати encoder_update()
-// ─────────────────────────────────────────
-
-int8_t encDelta = 0;
-bool   evClick  = false;
-bool   evLong   = false;
 
 // ─────────────────────────────────────────
 // Публічні функції
@@ -84,7 +86,6 @@ void encoder_init()
     conf.intr_type     = GPIO_INTR_DISABLE;
     gpio_config(&conf);
 
-    // Читаємо початковий стан щоб уникнути хибного першого кроку
     uint8_t a    = gpio_get_level((gpio_num_t)ENCODER_A_PIN);
     uint8_t b    = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
     encoderState = (a << 1) | b;
@@ -92,15 +93,9 @@ void encoder_init()
 
 void encoder_update()
 {
-    // Скидаємо події попереднього циклу
-    encDelta = 0;
-    evClick  = false;
-    evLong   = false;
-
     uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
     // ── Обертання (Gray-code) ────────────────────────────────────
-
     uint8_t a    = gpio_get_level((gpio_num_t)ENCODER_A_PIN);
     uint8_t b    = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
     uint8_t curr = (a << 1) | b;
@@ -117,7 +112,9 @@ void encoder_update()
         {
             if ((now - lastStepMs) >= ENCODER_STEP_MS)
             {
-                encDelta  = +1;
+                // Атомарне накопичення — просто +=
+                // UI прочитає і скине коли буде готовий
+                encSteps = encSteps + 1;
                 lastStepMs = now;
             }
             encoderAccum = 0;
@@ -126,7 +123,7 @@ void encoder_update()
         {
             if ((now - lastStepMs) >= ENCODER_STEP_MS)
             {
-                encDelta  = -1;
+                encSteps = encSteps - 1;
                 lastStepMs = now;
             }
             encoderAccum = 0;
@@ -138,16 +135,12 @@ void encoder_update()
     }
 
     // ── Кнопка ───────────────────────────────────────────────────
-
     bool pressed = (gpio_get_level((gpio_num_t)ENCODER_BTN_PIN) == 0);
 
     switch (btnState)
     {
         case BTN_IDLE:
-            if (pressed) {
-                btnTimer = now;
-                btnState = BTN_DEBOUNCE_PRESS;
-            }
+            if (pressed) { btnTimer = now; btnState = BTN_DEBOUNCE_PRESS; }
             break;
 
         case BTN_DEBOUNCE_PRESS:
