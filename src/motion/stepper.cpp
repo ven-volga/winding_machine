@@ -1,23 +1,30 @@
 // stepper.cpp
 //
-// Низькорівневе керування кроковиками.
+// Реальне керування кроковиками через TMC2209.
 //
-// ═══════════════════════════════════════════════════════════
-// ЗАРАЗ: заглушка
-//   GPIO не чіпаємо — логуємо кроки в Serial.
-//   Синхронізацію і логіку можна тестувати без заліза.
+// Підключення:
+//   SPINDLE:  STEP=25, DIR=26, EN=27
+//   CARRIAGE: STEP=14, DIR=12, EN=13
 //
-// ПІСЛЯ ПРИХОДУ TMC2209:
-//   Замінити тіла spindle_step() і carriage_step()
-//   на реальні GPIO виклики (розкоментувати блоки нижче).
-//   stepper_init() — розкоментувати gpio_config.
-//   Все інше залишається без змін.
-// ═══════════════════════════════════════════════════════════
+// TMC2209 особливості:
+//   EN активний LOW — gpio HIGH = драйвер вимкнено
+//                     gpio LOW  = драйвер увімкнено
+//
+//   STEP імпульс мінімум 1мкс HIGH + 1мкс LOW (datasheet).
+//   Ми використовуємо 2мкс + 2мкс — з запасом.
+//
+//   DIR має бути стабільним мінімум 20нс до STEP імпульсу.
+//   В нашому коді DIR встановлюється окремо перед кроками —
+//   затримка між set_dir і step достатня.
+//
+// Важливо при першому запуску:
+//   Перевір напрямок обертання шпинделя.
+//   Якщо крутиться не в той бік — поміняй місцями
+//   два дроти однієї обмотки мотора АБО інвертуй логіку:
+//   #define SPINDLE_DIR_INVERT  1  (додати в config.h)
 
 #include "stepper.h"
 #include "pins.h"
-
-#include <cstdio>
 
 extern "C" {
     #include "driver/gpio.h"
@@ -25,15 +32,11 @@ extern "C" {
 }
 
 // ─────────────────────────────────────────
-// Поточний стан драйверів
+// Поточний стан
 // ─────────────────────────────────────────
 
-static bool spindleDir  = true;   // true = CW
-static bool carriageDir = true;   // true = вперед
-
-// Лічильники для Serial логу
-static uint32_t spindleSteps  = 0;
-static uint32_t carriageSteps = 0;
+static bool spindleDir  = true;
+static bool carriageDir = true;
 
 // ─────────────────────────────────────────
 // stepper_init
@@ -41,11 +44,7 @@ static uint32_t carriageSteps = 0;
 
 void stepper_init()
 {
-    // ── ЗАГЛУШКА ────────────────────────────────────────────────
-    printf("[STEPPER] init (stub mode — no real GPIO)\n");
-
-    // ── РЕАЛЬНИЙ КОД (розкоментувати після TMC2209) ─────────────
-    /*
+    // Налаштовуємо всі 6 пінів як виходи
     uint64_t pins =
         (1ULL << SPINDLE_STEP_PIN)  |
         (1ULL << SPINDLE_DIR_PIN)   |
@@ -62,14 +61,18 @@ void stepper_init()
     conf.intr_type     = GPIO_INTR_DISABLE;
     gpio_config(&conf);
 
-    // EN активний LOW — вимикаємо до старту
+    // EN HIGH = драйвер вимкнено (активний LOW)
+    // Вмикаємо тільки коли треба рухатись
     gpio_set_level((gpio_num_t)SPINDLE_EN_PIN,  1);
     gpio_set_level((gpio_num_t)CARRIAGE_EN_PIN, 1);
 
-    // Початковий напрямок
+    // STEP LOW в спокої
+    gpio_set_level((gpio_num_t)SPINDLE_STEP_PIN,  0);
+    gpio_set_level((gpio_num_t)CARRIAGE_STEP_PIN, 0);
+
+    // Початковий напрямок — вперед
     gpio_set_level((gpio_num_t)SPINDLE_DIR_PIN,  1);
     gpio_set_level((gpio_num_t)CARRIAGE_DIR_PIN, 1);
-    */
 }
 
 // ─────────────────────────────────────────
@@ -79,75 +82,44 @@ void stepper_init()
 void spindle_set_dir(bool forward)
 {
     spindleDir = forward;
-
-    // ── РЕАЛЬНИЙ КОД ────────────────────────────────────────────
-    // gpio_set_level((gpio_num_t)SPINDLE_DIR_PIN, forward ? 1 : 0);
+    gpio_set_level((gpio_num_t)SPINDLE_DIR_PIN, forward ? 1 : 0);
 }
 
 void spindle_enable(bool en)
 {
-    // EN активний LOW на TMC2209
-    // ── РЕАЛЬНИЙ КОД ────────────────────────────────────────────
-    // gpio_set_level((gpio_num_t)SPINDLE_EN_PIN, en ? 0 : 1);
-
-    printf("[STEPPER] spindle %s\n", en ? "ENABLED" : "DISABLED");
+    // EN активний LOW: en=true → LOW (увімкнено)
+    //                  en=false → HIGH (вимкнено)
+    gpio_set_level((gpio_num_t)SPINDLE_EN_PIN, en ? 0 : 1);
 }
 
 void spindle_step()
 {
-    spindleSteps++;
-
-    // ── ЗАГЛУШКА — логуємо кожні 200 кроків ─────────────────────
-    if (spindleSteps % 200 == 0)
-    {
-        printf("[SPINDLE] steps=%lu dir=%s\n",
-               (unsigned long)spindleSteps,
-               spindleDir ? "CW" : "CCW");
-    }
-
-    // ── РЕАЛЬНИЙ КОД ────────────────────────────────────────────
-    // STEP імпульс: HIGH → затримка → LOW
-    // gpio_set_level((gpio_num_t)SPINDLE_STEP_PIN, 1);
-    // esp_rom_delay_us(2);   // мінімум 1мкс по datasheet TMC2209
-    // gpio_set_level((gpio_num_t)SPINDLE_STEP_PIN, 0);
-    // esp_rom_delay_us(2);
+    // STEP імпульс: HIGH 2мкс → LOW 2мкс
+    gpio_set_level((gpio_num_t)SPINDLE_STEP_PIN, 1);
+    esp_rom_delay_us(2);
+    gpio_set_level((gpio_num_t)SPINDLE_STEP_PIN, 0);
+    esp_rom_delay_us(2);
 }
 
 // ─────────────────────────────────────────
-// Каретка укладчика
+// Каретка
 // ─────────────────────────────────────────
 
 void carriage_set_dir(bool forward)
 {
     carriageDir = forward;
-
-    // ── РЕАЛЬНИЙ КОД ────────────────────────────────────────────
-    // gpio_set_level((gpio_num_t)CARRIAGE_DIR_PIN, forward ? 1 : 0);
+    gpio_set_level((gpio_num_t)CARRIAGE_DIR_PIN, forward ? 1 : 0);
 }
 
 void carriage_enable(bool en)
 {
-    // ── РЕАЛЬНИЙ КОД ────────────────────────────────────────────
-    // gpio_set_level((gpio_num_t)CARRIAGE_EN_PIN, en ? 0 : 1);
-
-    printf("[STEPPER] carriage %s\n", en ? "ENABLED" : "DISABLED");
+    gpio_set_level((gpio_num_t)CARRIAGE_EN_PIN, en ? 0 : 1);
 }
 
 void carriage_step()
 {
-    carriageSteps++;
-
-    // ── ЗАГЛУШКА — логуємо кожні 200 кроків ─────────────────────
-    if (carriageSteps % 200 == 0)
-    {
-        printf("[CARRIAGE] steps=%lu dir=%s\n",
-               (unsigned long)carriageSteps,
-               carriageDir ? "FWD" : "REV");
-    }
-
-    // ── РЕАЛЬНИЙ КОД ────────────────────────────────────────────
-    // gpio_set_level((gpio_num_t)CARRIAGE_STEP_PIN, 1);
-    // esp_rom_delay_us(2);
-    // gpio_set_level((gpio_num_t)CARRIAGE_STEP_PIN, 0);
-    // esp_rom_delay_us(2);
+    gpio_set_level((gpio_num_t)CARRIAGE_STEP_PIN, 1);
+    esp_rom_delay_us(2);
+    gpio_set_level((gpio_num_t)CARRIAGE_STEP_PIN, 0);
+    esp_rom_delay_us(2);
 }
