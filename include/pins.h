@@ -8,16 +8,16 @@
 // ШПИНДЕЛЬ (TMC2209)
 // ─────────────────────────────────────────
 
-#define SPINDLE_STEP_PIN    25
-#define SPINDLE_DIR_PIN     26
+#define SPINDLE_STEP_PIN    26
+#define SPINDLE_DIR_PIN     25
 #define SPINDLE_EN_PIN      27
 
 // ─────────────────────────────────────────
 // УКЛАДЧИК (TMC2209)
 // ─────────────────────────────────────────
 
-#define CARRIAGE_STEP_PIN   14
-#define CARRIAGE_DIR_PIN    12
+#define CARRIAGE_STEP_PIN   12
+#define CARRIAGE_DIR_PIN    14
 #define CARRIAGE_EN_PIN     13
 
 // ─────────────────────────────────────────
