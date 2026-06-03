@@ -1,7 +1,11 @@
 // motion.cpp
 //
 // Генерація кроків шпинделя і синхронна подача каретки.
-// Також: переміщення каретки до заданої позиції (moveTo).
+//
+// Важливо:
+//   Шпиндель ЗАВЖДИ крутиться в одному напрямку (CW).
+//   dirForward визначає тільки напрямок КАРЕТКИ.
+//   При реверсі каретки шпиндель не змінює напрямок.
 
 #include "motion.h"
 #include "stepper.h"
@@ -39,28 +43,22 @@ static uint32_t targetDelayUs       = ACCEL_START_DELAY_US;
 static uint32_t currentDelayUs      = ACCEL_START_DELAY_US;
 static uint32_t localSpeed          = 300;
 static float    localDiameter       = 0.20f;
-static bool     localDir            = true;
+static bool     localDir            = true;  // напрямок ТІЛЬКИ каретки
 
 // ─────────────────────────────────────────
-// MoveTo — переміщення каретки до позиції
+// MoveTo
 // ─────────────────────────────────────────
 
-// Фіксована затримка для повільного точного переміщення
 static uint32_t homeMoveDelayUs = 0;
 
 static void update_home_delay()
 {
-    // Розраховуємо затримку для CARRIAGE_HOME_SPEED_RPM
-    // Каретка рухається незалежно від шпинделя —
-    // рахуємо кроки мотора каретки напряму
     float stepsPerSecond =
         (float)(MOTOR_STEPS * MICROSTEPS) *
         (float)CARRIAGE_HOME_SPEED_RPM / 60.0f;
     homeMoveDelayUs = (uint32_t)(1000000.0f / stepsPerSecond);
 }
 
-// Виконати одну ітерацію переміщення до targetPos.
-// Повертає true якщо ще рухаємось, false якщо досягли цілі.
 static bool moveto_step()
 {
     shared_lock();
@@ -68,32 +66,26 @@ static bool moveto_step()
     float pos    = shared.carriagePos;
     shared_unlock();
 
-    float diff = target - pos;
+    float diff   = target - pos;
     float stepMm = T8_LEAD_MM / (float)(MOTOR_STEPS * MICROSTEPS);
 
-    // Досягли цілі з точністю до одного кроку
     if (fabsf(diff) < stepMm)
     {
         shared_lock();
         shared.moveToActive = false;
-        shared.carriagePos  = target; // вирівнюємо точно
+        shared.carriagePos  = target;
         shared_unlock();
-
         carriage_enable(false);
         return false;
     }
 
-    // Визначаємо напрямок
     bool dir = (diff > 0);
     carriage_set_dir(dir);
     carriage_enable(true);
     carriage_step();
 
     shared_lock();
-    if (dir)
-        shared.carriagePos += stepMm;
-    else
-        shared.carriagePos -= stepMm;
+    shared.carriagePos += dir ? stepMm : -stepMm;
     shared_unlock();
 
     esp_rom_delay_us(homeMoveDelayUs);
@@ -101,7 +93,7 @@ static bool moveto_step()
 }
 
 // ─────────────────────────────────────────
-// Локальні функції намотки
+// Локальні функції
 // ─────────────────────────────────────────
 
 static void update_carriage_ratio(float diameter)
@@ -147,7 +139,7 @@ static void ramp_update()
             else
             {
                 currentDelayUs = ACCEL_START_DELAY_US;
-                rampState = RAMP_IDLE;
+                rampState      = RAMP_IDLE;
                 shared_lock();
                 shared.running = false;
                 shared_unlock();
@@ -191,9 +183,12 @@ void motion_start()
     update_carriage_ratio(localDiameter);
     update_target_delay(localSpeed);
 
-    spindle_set_dir(localDir);
-    carriage_set_dir(localDir);
+    // Шпиндель ЗАВЖДИ CW (true) — не залежить від dirForward
+    spindle_set_dir(true);
     spindle_enable(true);
+
+    // Каретка — відповідно до dirForward
+    carriage_set_dir(localDir);
     carriage_enable(true);
 
     currentDelayUs = ACCEL_START_DELAY_US;
@@ -228,9 +223,7 @@ void motion_move_to(float mm)
 
 void motion_update()
 {
-    // ── Перевіряємо moveToActive — вищий пріоритет ───────────────
-    // Якщо активне переміщення до позиції — виконуємо його
-    // і ігноруємо все інше поки не досягнемо цілі
+    // MoveTo — вищий пріоритет
     shared_lock();
     bool moveActive = shared.moveToActive;
     shared_unlock();
@@ -241,7 +234,6 @@ void motion_update()
         return;
     }
 
-    // ── Звичайний режим намотки ──────────────────────────────────
     if (rampState == RAMP_IDLE)
     {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -250,25 +242,28 @@ void motion_update()
 
     ramp_update();
 
-    // Читаємо актуальний напрямок з shared
+    // Читаємо напрямок каретки і швидкість
     shared_lock();
-    bool currentDir = shared.dirForward;
+    bool     currentDir   = shared.dirForward;
     uint32_t currentSpeed = shared.spindleSpeed;
     shared_unlock();
 
+    // Оновлюємо напрямок ТІЛЬКИ каретки — шпиндель не чіпаємо
     if (currentDir != localDir)
     {
         localDir = currentDir;
-        spindle_set_dir(localDir);
         carriage_set_dir(localDir);
+        // spindle_set_dir — не викликаємо, шпиндель завжди CW
     }
 
-    // Плавне оновлення швидкості якщо змінили енкодером
+    // Оновлення швидкості
     if (currentSpeed != localSpeed)
         motion_set_speed(currentSpeed);
 
+    // Крок шпинделя
     spindle_step();
 
+    // Крок каретки через accumulator
     carriageAccumulator += carriageStepRatio;
     while (carriageAccumulator >= 1.0f)
     {
@@ -277,10 +272,7 @@ void motion_update()
 
         float stepMm = T8_LEAD_MM / (float)(MOTOR_STEPS * MICROSTEPS);
         shared_lock();
-        if (localDir)
-            shared.carriagePos += stepMm;
-        else
-            shared.carriagePos -= stepMm;
+        shared.carriagePos += localDir ? stepMm : -stepMm;
         shared_unlock();
     }
 

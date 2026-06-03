@@ -68,10 +68,11 @@ void service_init()
     conf.intr_type     = GPIO_INTR_DISABLE;
     gpio_config(&conf);
 
-    float stepsPerSecond =
+    // Затримка каретки в сервісному режимі
+    float carriageSteps =
         (float)(MOTOR_STEPS * MICROSTEPS) *
-        (float)CARRIAGE_HOME_SPEED_RPM / 60.0f;
-    carriageStepDelayUs = (uint32_t)(1000000.0f / stepsPerSecond);
+        (float)SERVICE_CARRIAGE_SPEED_RPM / 60.0f;
+    carriageStepDelayUs = (uint32_t)(1000000.0f / carriageSteps);
 }
 
 void service_update()
@@ -97,9 +98,9 @@ void service_update()
     bool leftBtn  = buttons[2].pressed;
     bool rightBtn = buttons[3].pressed;
 
-    shared_lock();
-    uint32_t speed = shared.spindleSpeed;
-    shared_unlock();
+    // В сервісному режимі шпиндель крутиться на фіксованій швидкості
+    // SERVICE_SPINDLE_SPEED_RPM з config.h — незалежно від налаштувань
+    uint32_t speed = SERVICE_SPINDLE_SPEED_RPM;
 
     float stepMm = T8_LEAD_MM / (float)(MOTOR_STEPS * MICROSTEPS);
 
