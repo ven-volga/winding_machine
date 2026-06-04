@@ -236,7 +236,14 @@ void motion_update()
 
     if (rampState == RAMP_IDLE)
     {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        shared_lock();
+        bool moveActive = shared.moveToActive;
+        bool serviceActive = shared.serviceCarriageActive;
+        shared_unlock();
+
+        if (!moveActive && !serviceActive)
+            vTaskDelay(pdMS_TO_TICKS(10));
+
         return;
     }
 
