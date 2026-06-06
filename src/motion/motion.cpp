@@ -236,14 +236,10 @@ void motion_update()
 
     if (rampState == RAMP_IDLE)
     {
-        shared_lock();
-        bool moveActive = shared.moveToActive;
-        bool serviceActive = shared.serviceCarriageActive;
-        shared_unlock();
-
-        if (!moveActive && !serviceActive)
-            vTaskDelay(pdMS_TO_TICKS(10));
-
+        // Коли стоїть — даємо service_update() час виконатись.
+        // vTaskDelay(1) віддає процесор на 1мс — service отримує час.
+        // Без цього цикл молотить на максимумі і service не встигає.
+        vTaskDelay(pdMS_TO_TICKS(1));
         return;
     }
 

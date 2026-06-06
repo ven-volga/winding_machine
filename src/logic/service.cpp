@@ -39,9 +39,10 @@ static ServiceBtn buttons[4] = {
     { (gpio_num_t)BTN_CARRIAGE_RIGHT, false, false, 0 },
 };
 
-static bool     spindleRunning   = false;
-static bool     carriageRunning  = false;
-static uint32_t spindleStepCount = 0;
+static bool     spindleRunning      = false;
+static bool     carriageRunning     = false;
+static uint32_t spindleStepCount    = 0;
+static uint32_t spindleStepDelayUs  = 0;
 static uint32_t carriageStepDelayUs = 0;
 
 static const uint32_t STEPS_PER_TURN =
@@ -68,11 +69,17 @@ void service_init()
     conf.intr_type     = GPIO_INTR_DISABLE;
     gpio_config(&conf);
 
-    // Затримка каретки в сервісному режимі
-    float carriageSteps =
+    // Затримка шпинделя — SPINDLE_RATIO враховує передачу 1:2
+    float spindleStepsPerSec =
+        (float)(MOTOR_STEPS * MICROSTEPS) * SPINDLE_RATIO *
+        (float)SERVICE_SPINDLE_SPEED_RPM / 60.0f;
+    spindleStepDelayUs = (uint32_t)(1000000.0f / spindleStepsPerSec);
+
+    // Затримка каретки
+    float carriageStepsPerSec =
         (float)(MOTOR_STEPS * MICROSTEPS) *
         (float)SERVICE_CARRIAGE_SPEED_RPM / 60.0f;
-    carriageStepDelayUs = (uint32_t)(1000000.0f / carriageSteps);
+    carriageStepDelayUs = (uint32_t)(1000000.0f / carriageStepsPerSec);
 }
 
 void service_update()
@@ -98,10 +105,6 @@ void service_update()
     bool leftBtn  = buttons[2].pressed;
     bool rightBtn = buttons[3].pressed;
 
-    // В сервісному режимі шпиндель крутиться на фіксованій швидкості
-    // SERVICE_SPINDLE_SPEED_RPM з config.h — незалежно від налаштувань
-    uint32_t speed = SERVICE_SPINDLE_SPEED_RPM;
-
     float stepMm = T8_LEAD_MM / (float)(MOTOR_STEPS * MICROSTEPS);
 
     // ── Шпиндель ─────────────────────────────────────────────────
@@ -112,11 +115,11 @@ void service_update()
         {
             spindle_set_dir(true);
             spindle_enable(true);
-            motion_set_speed(speed);
             spindleRunning   = true;
             spindleStepCount = 0;
         }
         spindle_step();
+        esp_rom_delay_us(spindleStepDelayUs);
         spindleStepCount++;
         if (spindleStepCount >= STEPS_PER_TURN)
         {
@@ -125,7 +128,6 @@ void service_update()
             shared.turns++;
             shared_unlock();
         }
-        motion_set_speed(speed);
     }
     else if (ccwBtn && !cwBtn)
     {
@@ -133,11 +135,11 @@ void service_update()
         {
             spindle_set_dir(false);
             spindle_enable(true);
-            motion_set_speed(speed);
             spindleRunning   = true;
             spindleStepCount = 0;
         }
         spindle_step();
+        esp_rom_delay_us(spindleStepDelayUs);
         spindleStepCount++;
         if (spindleStepCount >= STEPS_PER_TURN)
         {
@@ -146,7 +148,6 @@ void service_update()
             if (shared.turns > 0) shared.turns--;
             shared_unlock();
         }
-        motion_set_speed(speed);
     }
     else
     {
