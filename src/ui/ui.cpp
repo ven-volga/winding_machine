@@ -53,6 +53,8 @@ typedef enum
     UI_EDIT,
     UI_SUBMENU_POS,
     UI_SUBMENU_EDIT,
+    UI_SUBMENU_TURNS,
+    UI_SUBMENU_TURNS_EDIT,
 } UiMode;
 
 typedef enum
@@ -68,11 +70,19 @@ typedef enum
 
 typedef enum
 {
-    SUBMENU_SET_VALUE = 0,
-    SUBMENU_SET_HOME  = 1,
-    SUBMENU_AUTO_REV  = 2,
-    SUBMENU_COUNT     = 3,
+    SUBMENU_GO_HOME   = 0,  // поїхати в позицію 0
+    SUBMENU_SET_VALUE = 1,  // задати позицію і поїхати
+    SUBMENU_SET_HOME  = 2,  // скинути поточну позицію в 0
+    SUBMENU_AUTO_REV  = 3,  // автореверс ON/OFF
+    SUBMENU_COUNT     = 4,
 } PosSubmenu;
+
+typedef enum
+{
+    TURNS_SET   = 0,  // задати кількість витків (з прискоренням)
+    TURNS_RESET = 1,  // скинути лічильник в 0
+    TURNS_COUNT = 2,
+} TurnsSubmenu;
 
 // ─────────────────────────────────────────
 // Стан UI
@@ -93,6 +103,9 @@ static uint32_t editTargetTurns = 0;
 static uint8_t  submenuItem  = SUBMENU_SET_VALUE;
 static float    editPos      = 0.0f;
 static bool     editAutoRev  = true;
+
+// Підменю TURNS
+static uint8_t turnsItem = TURNS_SET;
 
 // Кеш
 static uint32_t lastTurns        = 0xFFFFFFFF;
@@ -247,33 +260,119 @@ static void draw_full_screen(const SharedState& s)
 // Підменю POS
 // ─────────────────────────────────────────
 
-static void draw_submenu_pos(const SharedState& s, bool editMode)
+// ─────────────────────────────────────────
+// Підменю TURNS — 2 рядки + 2 порожніх (центровані)
+// ─────────────────────────────────────────
+
+static void draw_submenu_turns(bool editMode, uint32_t currentTurns, uint32_t targetTurns)
 {
     lcd_clear();
-    lcd_set_cursor(0, 0);
-    lcd_print("-- POS SETTINGS --");
-
     char buf[21];
+    char cur;
 
-    // Set value
-    snprintf(buf, sizeof(buf), "%cSet val: %6.1fmm",
-             (submenuItem == SUBMENU_SET_VALUE) ? (editMode ? '*' : '>') : ' ',
-             editPos);
+    // Row 0: заголовок
+    lcd_set_cursor(0, 0); lcd_print("-- TURNS MENU --    ");
+
+    // Row 1: Set target
+    cur = (turnsItem == TURNS_SET) ? (editMode ? '*' : '>') : ' ';
+    if (editMode && turnsItem == TURNS_SET)
+        snprintf(buf, sizeof(buf), "%cTarget:%4u turns  ", cur, (unsigned)(targetTurns > 9999 ? 9999 : targetTurns));
+    else
+    {
+        uint32_t t = targetTurns > 9999 ? 9999 : targetTurns;
+        snprintf(buf, sizeof(buf), "%cSet target: %4u   ", cur, (unsigned)t);
+    }
     buf[20] = '\0';
     lcd_set_cursor(0, 1); lcd_print(buf);
 
-    // Set home
-    snprintf(buf, sizeof(buf), "%cSet home (0.00mm)",
-             (submenuItem == SUBMENU_SET_HOME) ? (editMode ? '*' : '>') : ' ');
+    // Row 2: Reset counter
+    cur = (turnsItem == TURNS_RESET) ? (editMode ? '*' : '>') : ' ';
+    uint32_t ct = currentTurns > 9999 ? 9999 : currentTurns;
+    snprintf(buf, sizeof(buf), "%cReset  now:%4u    ", cur, (unsigned)ct);
     buf[20] = '\0';
     lcd_set_cursor(0, 2); lcd_print(buf);
 
-    // Auto rev
-    snprintf(buf, sizeof(buf), "%cAuto rev:     %s",
-             (submenuItem == SUBMENU_AUTO_REV) ? (editMode ? '*' : '>') : ' ',
-             editAutoRev ? "ON " : "OFF");
+    // Row 3: підказка
+    lcd_set_cursor(0, 3);
+    lcd_print(" Long=ok  Short=back");
+}
+
+static void update_turns_cursor(uint8_t prev, bool editMode, uint32_t currentTurns, uint32_t targetTurns)
+{
+    // Перемальовуємо тільки 2 рядки
+    char buf[21];
+    char cur;
+
+    auto draw_row = [&](uint8_t idx, uint8_t row) {
+        cur = (turnsItem == idx) ? (editMode ? '*' : '>') : ' ';
+        if (idx == TURNS_SET)
+        {
+            uint32_t t = targetTurns > 9999 ? 9999 : targetTurns;
+            snprintf(buf, sizeof(buf), "%cSet target: %4u   ", cur, (unsigned)t);
+        }
+        else
+        {
+            uint32_t ct = currentTurns > 9999 ? 9999 : currentTurns;
+            snprintf(buf, sizeof(buf), "%cReset  now:%4u    ", cur, (unsigned)ct);
+        }
+        buf[20] = '\0';
+        lcd_set_cursor(0, row);
+        lcd_print(buf);
+    };
+
+    draw_row(prev == TURNS_SET ? TURNS_SET : TURNS_RESET,
+             prev == TURNS_SET ? 1 : 2);
+    draw_row(turnsItem == TURNS_SET ? TURNS_SET : TURNS_RESET,
+             turnsItem == TURNS_SET ? 1 : 2);
+}
+
+// ─────────────────────────────────────────
+// Намалювати один рядок підменю
+static void draw_submenu_row(uint8_t row, uint8_t idx, bool editMode)
+{
+    char buf[21];
+    char cur = (submenuItem == idx) ? (editMode ? '*' : '>') : ' ';
+
+    switch (idx)
+    {
+        case SUBMENU_GO_HOME:
+            snprintf(buf, sizeof(buf), "%cGo home -> 0.0mm  ", cur);
+            break;
+        case SUBMENU_SET_VALUE:
+            snprintf(buf, sizeof(buf), "%cSet pos: %6.1fmm", cur, editPos);
+            break;
+        case SUBMENU_SET_HOME:
+            snprintf(buf, sizeof(buf), "%cSet home  0.00mm  ", cur);
+            break;
+        case SUBMENU_AUTO_REV:
+            snprintf(buf, sizeof(buf), "%cAuto rev:     %s",
+                     cur, editAutoRev ? "ON " : "OFF");
+            break;
+        default:
+            buf[0] = '\0';
+            break;
+    }
     buf[20] = '\0';
-    lcd_set_cursor(0, 3); lcd_print(buf);
+    lcd_set_cursor(0, row);
+    lcd_print(buf);
+}
+
+static void draw_submenu_pos(const SharedState& s, bool editMode)
+{
+    lcd_clear();
+    // 4 пункти на 4 рядки — без заголовка
+    draw_submenu_row(0, SUBMENU_GO_HOME,   editMode);
+    draw_submenu_row(1, SUBMENU_SET_VALUE, editMode);
+    draw_submenu_row(2, SUBMENU_SET_HOME,  editMode);
+    draw_submenu_row(3, SUBMENU_AUTO_REV,  editMode);
+}
+
+// Оновити тільки два рядки курсора (попередній і новий)
+// без перемалювання всього екрану
+static void update_submenu_cursor(uint8_t prev, bool editMode)
+{
+    draw_submenu_row(prev,        prev,        editMode);
+    draw_submenu_row(submenuItem, submenuItem, editMode);
 }
 
 // ─────────────────────────────────────────
@@ -317,6 +416,9 @@ void ui_update()
     {
         if (uiMode == UI_SUBMENU_POS || uiMode == UI_SUBMENU_EDIT)
             draw_submenu_pos(s, uiMode == UI_SUBMENU_EDIT);
+        else if (uiMode == UI_SUBMENU_TURNS || uiMode == UI_SUBMENU_TURNS_EDIT)
+            draw_submenu_turns(uiMode == UI_SUBMENU_TURNS_EDIT,
+                               s.turns, editTargetTurns);
         else
             draw_full_screen(s);
         needFullRedraw = false;
@@ -364,6 +466,12 @@ void ui_update()
                 shared_unlock();
                 submenuItem    = SUBMENU_SET_VALUE;
                 uiMode         = UI_SUBMENU_POS;
+                needFullRedraw = true;
+            }
+            else if (selectedParam == PARAM_TURNS)
+            {
+                turnsItem      = TURNS_SET;
+                uiMode         = UI_SUBMENU_TURNS;
                 needFullRedraw = true;
             }
             else
@@ -501,7 +609,7 @@ void ui_update()
     }
 
     // ════════════════════════════════════════════════════════════
-    // SUBMENU_POS — вибір пункту
+    // SUBMENU_POS — вибір пункту (крутиш без перемалювання)
     // ════════════════════════════════════════════════════════════
     else if (uiMode == UI_SUBMENU_POS)
     {
@@ -510,12 +618,13 @@ void ui_update()
 
         if (steps != 0)
         {
+            uint8_t prev = submenuItem;
             if (steps > 0)
                 submenuItem = (submenuItem + 1) % SUBMENU_COUNT;
             else
                 submenuItem = (submenuItem + SUBMENU_COUNT - 1) % SUBMENU_COUNT;
-            needFullRedraw = true;
-            
+            // Оновлюємо тільки 2 рядки — без блимання
+            update_submenu_cursor(prev, false);
         }
 
         if (click)
@@ -548,15 +657,18 @@ void ui_update()
                         editPos += CARRIAGE_POS_STEP;
                     if (steps < 0 && editPos > CARRIAGE_POS_MIN)
                         editPos -= CARRIAGE_POS_STEP;
+                    // Оновлюємо тільки цей рядок — без блимання
+                    draw_submenu_row(1, SUBMENU_SET_VALUE, true);
                     break;
                 case SUBMENU_AUTO_REV:
                     editAutoRev = !editAutoRev;
+                    draw_submenu_row(3, SUBMENU_AUTO_REV, true);
                     break;
+                case SUBMENU_GO_HOME:
                 case SUBMENU_SET_HOME:
+                    // Крутіння не потрібне
                     break;
             }
-            needFullRedraw = true;
-            
         }
 
         // Короткий натиск → скасувати, повернутись в підменю
@@ -570,20 +682,27 @@ void ui_update()
             needFullRedraw = true;
         }
 
-        // Довгий натиск → зберегти
+        // Довгий натиск → виконати дію
         if (longPress)
         {
             switch (submenuItem)
             {
+                case SUBMENU_GO_HOME:
+                    // Поїхати в позицію 0 без зміни home point
+                    motion_move_to(0.0f);
+                    uiMode = UI_VIEW;
+                    needFullRedraw = true;
+                    break;
+
                 case SUBMENU_SET_VALUE:
-                    shared_lock();
-                    shared.autoReverse = editAutoRev;
-                    shared_unlock();
+                    // Поїхати до заданої позиції
                     motion_move_to(editPos);
                     uiMode = UI_VIEW;
+                    needFullRedraw = true;
                     break;
 
                 case SUBMENU_SET_HOME:
+                    // Скинути поточну позицію в 0 (не рухатись)
                     shared_lock();
                     shared.carriagePos = 0.0f;
                     shared_unlock();
@@ -592,6 +711,7 @@ void ui_update()
                     lcd_set_cursor(2, 2); lcd_print("pos = 0.00mm");
                     vTaskDelay(pdMS_TO_TICKS(1000));
                     uiMode = UI_VIEW;
+                    needFullRedraw = true;
                     break;
 
                 case SUBMENU_AUTO_REV:
@@ -599,9 +719,120 @@ void ui_update()
                     shared.autoReverse = editAutoRev;
                     shared_unlock();
                     uiMode = UI_SUBMENU_POS;
+                    needFullRedraw = true;
                     break;
             }
+        }
+    }
+    // ════════════════════════════════════════════════════════════
+    // SUBMENU_TURNS — вибір пункту
+    // ════════════════════════════════════════════════════════════
+    else if (uiMode == UI_SUBMENU_TURNS)
+    {
+        int32_t steps = encSteps;
+        encSteps = 0;
+
+        if (steps != 0)
+        {
+            uint8_t prev = turnsItem;
+            if (steps > 0)
+                turnsItem = (turnsItem + 1) % TURNS_COUNT;
+            else
+                turnsItem = (turnsItem + TURNS_COUNT - 1) % TURNS_COUNT;
+            update_turns_cursor(prev, false, s.turns, editTargetTurns);
+        }
+
+        // Короткий натиск → вийти в головне меню
+        if (click)
+        {
+            uiMode = UI_VIEW;
+            needFullRedraw = true;
+        }
+
+        // Довгий натиск → увійти в редагування
+        if (longPress)
+        {
+            shared_lock();
+            editTargetTurns = shared.targetTurns;
+            shared_unlock();
+            uiMode = UI_SUBMENU_TURNS_EDIT;
             needFullRedraw = true;
         }
     }
+
+    // ════════════════════════════════════════════════════════════
+    // SUBMENU_TURNS_EDIT — редагування пункту
+    // ════════════════════════════════════════════════════════════
+    else if (uiMode == UI_SUBMENU_TURNS_EDIT)
+    {
+        int32_t steps = encSteps;
+        encSteps = 0;
+
+        if (steps != 0 && turnsItem == TURNS_SET)
+        {
+            // Прискорення: чим швидше крутиш тим більший крок
+            uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            uint32_t elapsed = now - lastTurnsEditMs;
+            uint32_t step = 1;
+            if      (elapsed < 50)  step = 100;
+            else if (elapsed < 100) step = 10;
+            lastTurnsEditMs = now;
+
+            if (steps > 0)
+                editTargetTurns = (editTargetTurns + step > 9999) ?
+                                   9999 : editTargetTurns + step;
+            else
+                editTargetTurns = (editTargetTurns < step) ?
+                                   0 : editTargetTurns - step;
+
+            // Оновлюємо тільки рядок значення — без блимання
+            char buf[21];
+            snprintf(buf, sizeof(buf), "*Target:%4u turns  ",
+                     (unsigned)(editTargetTurns > 9999 ? 9999 : editTargetTurns));
+            buf[20] = '\0';
+            lcd_set_cursor(0, 1); lcd_print(buf);
+        }
+
+        // Короткий натиск → скасувати
+        if (click)
+        {
+            shared_lock();
+            editTargetTurns = shared.targetTurns;
+            shared_unlock();
+            uiMode = UI_SUBMENU_TURNS;
+            needFullRedraw = true;
+        }
+
+        // Довгий натиск → виконати
+        if (longPress)
+        {
+            switch (turnsItem)
+            {
+                case TURNS_SET:
+                    shared_lock();
+                    shared.targetTurns = editTargetTurns;
+                    shared_unlock();
+                    uiMode = UI_VIEW;
+                    needFullRedraw = true;
+                    break;
+
+                case TURNS_RESET:
+                    shared_lock();
+                    shared.turns      = 0;
+                    shared.targetTurns = 0;
+                    editTargetTurns   = 0;
+                    shared_unlock();
+                    // Підтвердження на екрані
+                    lcd_clear();
+                    lcd_set_cursor(2, 1); lcd_print("TURNS RESET!");
+                    lcd_set_cursor(2, 2); lcd_print("counter = 0");
+                    lcd_set_cursor(2, 3); lcd_print("target  = 0");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    uiMode = UI_VIEW;
+                    needFullRedraw = true;
+                    break;
+            }
+        }
+    }
+
 }

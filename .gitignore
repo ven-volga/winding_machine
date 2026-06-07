@@ -3,6 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.vscode
 sdkconfig.esp32dev
 sdkconfig.esp32doit-devkit-v1
 sdkconfig.defaults
