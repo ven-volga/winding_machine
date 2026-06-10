@@ -1,11 +1,26 @@
 // motion.cpp
 //
-// Генерація кроків шпинделя і синхронна подача каретки.
+// Два покращення:
 //
-// Важливо:
-//   Шпиндель ЗАВЖДИ крутиться в одному напрямку (CW).
-//   dirForward визначає тільки напрямок КАРЕТКИ.
-//   При реверсі каретки шпиндель не змінює напрямок.
+// 1. BRESENHAM замість float accumulator для каретки
+//    Замість:
+//      carriageAccumulator += ratio (float)
+//    Використовуємо цілочисельний алгоритм Bresenham:
+//      error += numerator
+//      if (error >= denominator) { step; error -= denominator; }
+//    Переваги:
+//      - немає накопичення похибки float
+//      - рівномірніший розподіл кроків (важливо для тонкого дроту)
+//      - без float у внутрішньому циклі
+//
+// 2. РОЗГІН ПО ЧАСУ замість по кроках
+//    Замість: currentDelayUs -= ACCEL_STEP_US на кожен крок
+//    Використовуємо: кожні ACCEL_INTERVAL_MS змінюємо затримку
+//    Переваги:
+//      - стабільний профіль розгону незалежно від навантаження CPU
+//      - передбачуваний час розгону/гальмування
+//
+// Шпиндель ЗАВЖДИ CW. dirForward = напрямок ТІЛЬКИ каретки.
 
 #include "motion.h"
 #include "stepper.h"
@@ -34,16 +49,61 @@ typedef enum
 static RampState rampState = RAMP_IDLE;
 
 // ─────────────────────────────────────────
-// Внутрішні змінні
+// Bresenham для каретки
+//
+// Синхронізація: на кожен крок шпинделя каретка
+// має пройти (wireDiameter / T8_LEAD_MM) / SPINDLE_RATIO кроків.
+//
+// Представляємо це як дріб: numerator / denominator
+// де обидва — цілі числа.
+//
+// Наприклад для діаметру 0.20мм:
+//   ratio = 0.20 / 2.0 / 2.0 = 0.05
+//   numerator   = 1
+//   denominator = 20
+//   тобто 1 крок каретки на кожні 20 кроків шпинделя
 // ─────────────────────────────────────────
 
-static float    carriageAccumulator = 0.0f;
-static float    carriageStepRatio   = 0.0f;
-static uint32_t targetDelayUs       = ACCEL_START_DELAY_US;
-static uint32_t currentDelayUs      = ACCEL_START_DELAY_US;
-static uint32_t localSpeed          = 300;
-static float    localDiameter       = 0.20f;
-static bool     localDir            = true;  // напрямок ТІЛЬКИ каретки
+static int32_t  breshError       = 0;
+static int32_t  breshNumerator   = 1;
+static int32_t  breshDenominator = 20;
+
+// Оновити коефіцієнти Bresenham при зміні діаметру дроту.
+// Масштабуємо на BRESH_SCALE щоб уникнути втрати точності
+// при дуже малих співвідношеннях.
+#define BRESH_SCALE 100000
+
+static void update_bresenham(float diameter)
+{
+    // Кроків каретки на крок шпинделя (дробове число)
+    float spindleStepsPerTurn  = (float)(MOTOR_STEPS * MICROSTEPS) * SPINDLE_RATIO;
+    float carriageStepsPerTurn = (diameter / T8_LEAD_MM) * (float)(MOTOR_STEPS * MICROSTEPS);
+    float ratio = carriageStepsPerTurn / spindleStepsPerTurn;
+
+    // Перетворюємо в цілочисельний дріб через масштабування
+    breshNumerator   = (int32_t)(ratio * BRESH_SCALE);
+    breshDenominator = BRESH_SCALE;
+    breshError       = 0;  // скидаємо помилку при зміні параметрів
+}
+
+// ─────────────────────────────────────────
+// Розгін по часу
+//
+// Кожні ACCEL_INTERVAL_MS міліскунд змінюємо currentDelayUs
+// на ACCEL_STEP_US — незалежно від швидкості циклу.
+// ─────────────────────────────────────────
+
+static uint32_t targetDelayUs  = ACCEL_START_DELAY_US;
+static uint32_t currentDelayUs = ACCEL_START_DELAY_US;
+static uint32_t lastRampMs     = 0;  // час останньої зміни затримки
+
+// ─────────────────────────────────────────
+// Інші внутрішні змінні
+// ─────────────────────────────────────────
+
+static uint32_t localSpeed    = 100;
+static float    localDiameter = 0.20f;
+static bool     localDir      = true;
 
 // ─────────────────────────────────────────
 // MoveTo
@@ -96,15 +156,6 @@ static bool moveto_step()
 // Локальні функції
 // ─────────────────────────────────────────
 
-static void update_carriage_ratio(float diameter)
-{
-    float spindleStepsPerTurn =
-        (float)(MOTOR_STEPS * MICROSTEPS) * SPINDLE_RATIO;
-    float carriageStepsPerTurn =
-        (diameter / T8_LEAD_MM) * (float)(MOTOR_STEPS * MICROSTEPS);
-    carriageStepRatio = carriageStepsPerTurn / spindleStepsPerTurn;
-}
-
 static void update_target_delay(uint32_t rpm)
 {
     if (rpm == 0) { targetDelayUs = 10000; return; }
@@ -113,38 +164,60 @@ static void update_target_delay(uint32_t rpm)
     targetDelayUs = (uint32_t)(1000000.0f / stepsPerSecond);
 }
 
+// Розгін по часу: викликається на кожному кроці але
+// реально змінює затримку тільки кожні ACCEL_INTERVAL_MS мс
 static void ramp_update()
 {
+    uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    bool timeToUpdate = (now - lastRampMs) >= ACCEL_INTERVAL_MS;
+
     switch (rampState)
     {
         case RAMP_IDLE:
             break;
 
         case RAMP_ACCELERATING:
-            if (currentDelayUs > targetDelayUs + ACCEL_STEP_US)
-                currentDelayUs -= ACCEL_STEP_US;
-            else { currentDelayUs = targetDelayUs; rampState = RAMP_RUNNING; }
+            if (timeToUpdate)
+            {
+                lastRampMs = now;
+                if (currentDelayUs > targetDelayUs + ACCEL_STEP_US)
+                    currentDelayUs -= ACCEL_STEP_US;
+                else
+                {
+                    currentDelayUs = targetDelayUs;
+                    rampState = RAMP_RUNNING;
+                }
+            }
             break;
 
         case RAMP_RUNNING:
-            if      (currentDelayUs < targetDelayUs)
-                currentDelayUs += ACCEL_STEP_US;
-            else if (currentDelayUs > targetDelayUs + ACCEL_STEP_US)
-                currentDelayUs -= ACCEL_STEP_US;
+            // Плавне підстроювання якщо змінили швидкість через UI
+            if (timeToUpdate)
+            {
+                lastRampMs = now;
+                if      (currentDelayUs < targetDelayUs)
+                    currentDelayUs += ACCEL_STEP_US;
+                else if (currentDelayUs > targetDelayUs + ACCEL_STEP_US)
+                    currentDelayUs -= ACCEL_STEP_US;
+            }
             break;
 
         case RAMP_DECELERATING:
-            if (currentDelayUs < ACCEL_START_DELAY_US - ACCEL_STEP_US)
-                currentDelayUs += ACCEL_STEP_US;
-            else
+            if (timeToUpdate)
             {
-                currentDelayUs = ACCEL_START_DELAY_US;
-                rampState      = RAMP_IDLE;
-                shared_lock();
-                shared.running = false;
-                shared_unlock();
-                spindle_enable(false);
-                carriage_enable(false);
+                lastRampMs = now;
+                if (currentDelayUs < ACCEL_START_DELAY_US - ACCEL_STEP_US)
+                    currentDelayUs += ACCEL_STEP_US;
+                else
+                {
+                    currentDelayUs = ACCEL_START_DELAY_US;
+                    rampState      = RAMP_IDLE;
+                    shared_lock();
+                    shared.running = false;
+                    shared_unlock();
+                    spindle_enable(false);
+                    carriage_enable(false);
+                }
             }
             break;
     }
@@ -165,9 +238,10 @@ void motion_init()
     localDir      = shared.dirForward;
     shared_unlock();
 
-    update_carriage_ratio(localDiameter);
+    update_bresenham(localDiameter);
     update_target_delay(localSpeed);
     currentDelayUs = ACCEL_START_DELAY_US;
+    lastRampMs     = 0;
 }
 
 void motion_start()
@@ -180,18 +254,17 @@ void motion_start()
     localDir      = shared.dirForward;
     shared_unlock();
 
-    update_carriage_ratio(localDiameter);
+    update_bresenham(localDiameter);
     update_target_delay(localSpeed);
 
-    // Шпиндель ЗАВЖДИ CW (true) — не залежить від dirForward
-    spindle_set_dir(true);
+    spindle_set_dir(true);   // шпиндель завжди CW
     spindle_enable(true);
 
-    // Каретка — відповідно до dirForward
     carriage_set_dir(localDir);
     carriage_enable(true);
 
     currentDelayUs = ACCEL_START_DELAY_US;
+    lastRampMs     = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     rampState = RAMP_ACCELERATING;
 }
 
@@ -210,7 +283,7 @@ void motion_set_speed(uint32_t rpm)
 void motion_set_wire_diameter(float mm)
 {
     localDiameter = mm;
-    update_carriage_ratio(mm);
+    update_bresenham(mm);
 }
 
 void motion_move_to(float mm)
@@ -236,42 +309,42 @@ void motion_update()
 
     if (rampState == RAMP_IDLE)
     {
-        // Коли стоїть — даємо service_update() час виконатись.
-        // vTaskDelay(1) віддає процесор на 1мс — service отримує час.
-        // Без цього цикл молотить на максимумі і service не встигає.
         vTaskDelay(pdMS_TO_TICKS(1));
         return;
     }
 
+    // ── Розгін (по часу) ─────────────────────────────────────────
     ramp_update();
 
-    // Читаємо напрямок каретки і швидкість
+    // ── Читаємо актуальні параметри ──────────────────────────────
     shared_lock();
     bool     currentDir   = shared.dirForward;
     uint32_t currentSpeed = shared.spindleSpeed;
     shared_unlock();
 
-    // Оновлюємо напрямок ТІЛЬКИ каретки — шпиндель не чіпаємо
+    // ── Напрямок каретки ─────────────────────────────────────────
     if (currentDir != localDir)
     {
         localDir = currentDir;
         carriage_set_dir(localDir);
-        // spindle_set_dir — не викликаємо, шпиндель завжди CW
     }
 
-    // Оновлення швидкості
+    // ── Швидкість ────────────────────────────────────────────────
     if (currentSpeed != localSpeed)
         motion_set_speed(currentSpeed);
 
-    // Крок шпинделя
+    // ── Крок шпинделя ────────────────────────────────────────────
     spindle_step();
 
-    // Крок каретки через accumulator
-    carriageAccumulator += carriageStepRatio;
-    while (carriageAccumulator >= 1.0f)
+    // ── Bresenham для каретки ────────────────────────────────────
+    // Додаємо numerator до помилки кожен крок шпинделя.
+    // Коли помилка >= denominator — робимо крок каретки.
+    // Це рівномірно розподіляє кроки каретки між кроками шпинделя.
+    breshError += breshNumerator;
+    if (breshError >= breshDenominator)
     {
+        breshError -= breshDenominator;
         carriage_step();
-        carriageAccumulator -= 1.0f;
 
         float stepMm = T8_LEAD_MM / (float)(MOTOR_STEPS * MICROSTEPS);
         shared_lock();
@@ -279,7 +352,7 @@ void motion_update()
         shared_unlock();
     }
 
-    // Лічильник витків
+    // ── Лічильник витків ─────────────────────────────────────────
     static uint32_t stepCount = 0;
     stepCount++;
     uint32_t stepsPerTurn =
@@ -292,5 +365,6 @@ void motion_update()
         shared_unlock();
     }
 
+    // ── Затримка ─────────────────────────────────────────────────
     esp_rom_delay_us(currentDelayUs);
 }
