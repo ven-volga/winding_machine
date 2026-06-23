@@ -1,12 +1,16 @@
 // machine.cpp
 //
 // autoReverse = true  → реверсує і мотає далі (нонстоп)
-// autoReverse = false → досяг кінця → зупинка → чекає
-//                       відпускання педалі і нового натискання
+// autoReverse = false → досяг кінця → зупинка → чекає педаль
+//
+// SW_SPINDLE_HOLD (тумблер):
+//   ON  → при зупинці шпиндель тримає момент
+//   OFF → шпиндель вільний
 
 #include "machine.h"
 #include "motion.h"
 #include "service.h"
+#include "stepper.h"
 #include "shared_state.h"
 #include "pins.h"
 #include "config.h"
@@ -22,12 +26,7 @@ extern "C" {
 static bool     pedalState   = false;
 static bool     lastRawPedal = false;
 static uint32_t pedalDebTime = 0;
-
-// Прапорець що шар завершено в пошаровому режимі.
-// true = чекаємо відпускання педалі перед стартом наступного шару.
-// Без цього: motion_stop() ще гальмує → running=true →
-// педаль натиснута → motion_start() знову → зупинки немає.
-static bool layerDone = false;
+static bool     layerDone    = false;
 
 static bool pedal_read()
 {
@@ -67,16 +66,10 @@ void machine_update()
     uint32_t targetTurns = shared.targetTurns;
     shared_unlock();
 
-    // ── Якщо шар завершено — чекаємо відпускання педалі ─────────
-    // Це блокує motion_start() поки педаль не відпустять
+    // ── Чекаємо відпускання педалі після завершення шару ─────────
     if (layerDone)
     {
-        if (!pedal)
-        {
-            // Педаль відпустили — готові до наступного шару
-            layerDone = false;
-        }
-        // Поки педаль натиснута або layerDone — нічого не робимо
+        if (!pedal) layerDone = false;
         return;
     }
 
@@ -96,15 +89,13 @@ void machine_update()
         motion_stop();
     }
 
-    // Оновлення швидкості під час роботи
-    if (running)
-        motion_set_speed(speed);
+    if (running) motion_set_speed(speed);
 
     // ── Зупинка по кількості витків ──────────────────────────────
     if (running && targetTurns > 0 && turns >= targetTurns)
     {
         motion_stop();
-        layerDone = true;  // чекаємо відпускання педалі
+        layerDone = true;
 
         shared_lock();
         shared.running = false;
@@ -121,18 +112,15 @@ void machine_update()
         {
             if (autoRev)
             {
-                // Нонстоп — реверсуємо і продовжуємо
                 shared_lock();
                 shared.dirForward = !dir;
                 shared_unlock();
             }
             else
             {
-                // Пошаровий — зупиняємо і чекаємо відпускання педалі
                 motion_stop();
                 layerDone = true;
 
-                // Змінюємо напрямок для наступного шару
                 shared_lock();
                 shared.dirForward = !dir;
                 shared.running    = false;

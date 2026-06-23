@@ -42,6 +42,10 @@ struct SharedState
 
     bool     serviceCarriageDir    = true;
     bool     serviceCarriageActive = false;
+
+    // Утримання шпинделя після зупинки (тумблер SW_SPINDLE_HOLD)
+    // true = залишати spindle_enable(true) після зупинки
+    bool     spindleHold = false;
 };
 
 extern SharedState       shared;
