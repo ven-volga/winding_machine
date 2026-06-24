@@ -199,7 +199,7 @@ void service_update()
     else if (serviceWindActive)
     {
         // Відпустили кнопку сервісної намотки
-        spindle_enable(hold ? true : false);
+        // spindle_enable встановиться в блоці else нижче
         carriage_enable(false);
         serviceWindActive = false;
 
@@ -254,11 +254,14 @@ void service_update()
     {
         if (spindleRunning)
         {
-            // Утримання шпинделя якщо тумблер ON
-            spindle_enable(hold ? true : false);
             spindleRunning   = false;
             spindleStepCount = 0;
         }
+
+        // Утримання перевіряємо КОЖЕН ЦИКЛ поки шпиндель не крутиться.
+        // Не тільки в момент зупинки — це гарантує актуальний стан тумблера.
+        if (!serviceWindActive)
+            spindle_enable(hold);
     }
 
     // ── Каретка L/R ──────────────────────────────────────────────

@@ -19,3 +19,7 @@ void motion_set_wire_diameter(float mm);
 void motion_move_to(float mm);
 
 void motion_update();
+
+// Миттєва аварійна зупинка — без гальмування.
+// Скидає стан ramp в IDLE, скидає accumulator.
+void motion_emergency_stop();

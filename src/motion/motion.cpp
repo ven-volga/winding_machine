@@ -252,6 +252,20 @@ void motion_move_to(float mm)
     shared_unlock();
 }
 
+void motion_emergency_stop()
+{
+    // Миттєва зупинка — без гальмування
+    // Скидаємо всі стани щоб наступний старт був чистим
+    rampState      = RAMP_IDLE;
+    breshError     = 0;
+    currentDelayUs = ACCEL_START_DELAY_US;
+
+    shared_lock();
+    shared.running      = false;
+    shared.moveToActive = false;
+    shared_unlock();
+}
+
 void motion_update()
 {
     shared_lock();
