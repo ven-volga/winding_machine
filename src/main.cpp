@@ -12,6 +12,7 @@
 #include "ui.h"
 #include "motion.h"
 #include "machine.h"
+#include "hall.h"
 #include "service.h"
 #include "stepper.h"
 #include "shared_state.h"
@@ -56,6 +57,7 @@ static void motion_task(void*)
     conf.intr_type     = GPIO_INTR_DISABLE;
     gpio_config(&conf);
 
+    hall_init();
     service_init();
     machine_init();
     motion_init();

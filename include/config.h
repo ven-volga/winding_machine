@@ -70,10 +70,27 @@
 #define WIRE_DIAMETER_STEP  0.01f
 
 #define WINDING_WIDTH_MIN   1.0f
-#define WINDING_WIDTH_MAX   200.0f
+#define WINDING_WIDTH_MAX   230.0f
 #define WINDING_WIDTH_STEP  0.5f
 
 // Діапазон позиції каретки — від'ємні для секційної намотки
 #define CARRIAGE_POS_MIN   -350.0f
 #define CARRIAGE_POS_MAX    350.0f
 #define CARRIAGE_POS_STEP   0.5f
+
+// ─────────────────────────────────────────
+// ДАТЧИКИ ХОЛЛА
+// ─────────────────────────────────────────
+ 
+// Кількість імпульсів на оберт шпинделя
+// 2 магніти × 2 датчики × 2 фронти = 8 подій на оберт
+#define HALL_PULSES_PER_TURN    8
+ 
+// Таймаут зупинки шпинделя (мс)
+// Якщо за цей час не прийшов імпульс — шпиндель вважається зупиненим
+#define HALL_TIMEOUT_MS         200
+ 
+// Поріг помилки синхронізації:
+// Якщо мотор зробив HALL_STALL_CHECK_STEPS кроків але Холл
+// не дав жодного імпульсу — шпиндель застряг, зупиняємо все
+#define HALL_STALL_CHECK_STEPS  400
