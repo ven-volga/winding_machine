@@ -303,23 +303,6 @@ void motion_update()
 
     spindle_step();
 
-    // Діагностика Холла — тимчасово
-    static uint32_t lastPrint = 0;
-    static int32_t totalPulses = 0;
-    totalPulses += hallPulses;
-    hallPulses = 0;
-
-    uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-    if (now - lastPrint > 2000) {
-        lastPrint = now;
-        printf("[HALL] total=%ld A=%lu B=%lu B_whenA=%d A_whenB=%d\n",
-            (long)totalPulses,
-            (unsigned long)hallPulsesA,
-            (unsigned long)hallPulsesB,
-           (    int)hallB_whenA,
-            (int)hallA_whenB);
-    }
-
     breshError += breshNumerator;
     if (breshError >= breshDenominator)
     {
